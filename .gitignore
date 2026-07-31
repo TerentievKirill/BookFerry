@@ -1,0 +1,12 @@
+build/
+.vscode/
+.idea/
+
+*.o
+*.app
+
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+*.log
