@@ -11,3 +11,9 @@ CMakeFiles/
 
 *.log
 Шпаргалка.md
+.venv/
+__pycache__/
+.git/
+Temp/
+*.pyc
+.env
