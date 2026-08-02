@@ -4,6 +4,7 @@ from typing import List
 from app.models import  SearchRequest, SendBookRequest
 from app.services.opds import search_opds, Book
 from app.services.book_delivery import deliver_book
+from app.config import DEFAULT_OPDS_URL
 
 
 router = APIRouter()
