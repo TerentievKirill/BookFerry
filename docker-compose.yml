@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  bookferry:
+    build: .
+    container_name: bookferry
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./Temp:/app/Temp
