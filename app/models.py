@@ -10,4 +10,4 @@ class Book(BaseModel):
 
 class SendBookRequest(BaseModel):
     email: str
-    file: str
+    book: Book
