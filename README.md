@@ -213,25 +213,6 @@ download.py     mail.py
 
 ---
 
-# Разработка
-
-Локально:
-
-```bash
-git add .
-git commit -m "Description"
-git push
-```
-
-На сервере:
-
-```bash
-cd /opt/BookFerry
-git pull
-docker compose up -d --build
-```
-
----
 
 # Планы
 
