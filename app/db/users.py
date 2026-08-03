@@ -25,7 +25,7 @@ def get_user(telegram_id: int):
 
         cursor.execute(
             """
-            SELECT telegram_id, emails, subject, opds_url
+            SELECT id, telegram_id, emails, subject, opds_url
             FROM users
             WHERE telegram_id = ?
             """,
@@ -54,7 +54,7 @@ def update_email(
 
 def update_subject(
     telegram_id: int,
-    subject: str,
+    subject: str | None,
 ):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -68,8 +68,7 @@ def update_subject(
             (subject, telegram_id),
         )
 
-    return cursor.rowcount > 0
-
+        return cursor.rowcount > 0
 def update_opds(
     telegram_id: int,
     opds_url: str,

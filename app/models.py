@@ -11,3 +11,10 @@ class Book(BaseModel):
 class SendBookRequest(BaseModel):
     email: str
     book: Book
+
+class TelegramUser(BaseModel):
+    id: int
+    telegram_id: str
+    opds_url: str
+    emails: str
+    subject: str | None = None
