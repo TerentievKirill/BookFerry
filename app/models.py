@@ -1,16 +1,20 @@
 from pydantic import BaseModel
 
 class SearchRequest(BaseModel):
+    telegram_id: int
     query: str
+
+
+class SendBookRequest(BaseModel):
+    telegram_id: int
+    url: str
 
 class Book(BaseModel):
     author: str
     title: str
     url: str
 
-class SendBookRequest(BaseModel):
-    emails: str
-    book: Book
+
 
 class TelegramUser(BaseModel):
     id: int

@@ -1,13 +1,26 @@
+import os
+
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from app.models import  SearchRequest, SendBookRequest, TelegramUser
-from app.services.opds import search_opds, Book
-from app.services.book_delivery import deliver_book
 from app.config import DEFAULT_OPDS_URL
+from app.db.users import (
+    create_user,
+    get_user,
+    update_email,
+    update_opds,
+    update_subject,
+)
+from app.models import (
+    Book,
+    SearchRequest,
+    SendBookRequest,
+    TelegramUser,
+)
 from app.services.download import download_book, remove_book
 from app.services.mail import send_file
+from app.services.opds import search_opds
 
 from app.db.users import (
     create_user,
@@ -46,12 +59,26 @@ def search(data: SearchRequest):
 
 @router.post("/send-book")
 def process_data(data: SendBookRequest):
-    path = download_book(data.book)
+    user = get_user(data.telegram_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Пользователь не найден",
+        )
+
+    if not user["emails"]:
+        raise HTTPException(
+            status_code=400,
+            detail="У пользователя не указан email",
+        )
+
+    path = download_book(data.url)
 
     try:
         emails = [
             email.strip()
-            for email in data.emails.split(",")
+            for email in user["emails"].split(",")
             if email.strip()
         ]
 
@@ -75,28 +102,12 @@ def process_data(data: SendBookRequest):
         remove_book(path)
         raise
 
+
+@router.get(
+    "/users/telegram/{telegram_id}",
+    response_model=TelegramUser,
+)
 def get_telegram_user(telegram_id: int):
-    user = get_user(telegram_id)
-
-    if user is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Пользователь Telegram не найден",
-        )
-
-    return TelegramUser(
-        id=user["id"],
-        telegram_id=user["telegram_id"],
-        opds_url=user["opds_url"],
-        emails=user["emails"],
-        subject=user["subject"],
-    )
-
-@router.patch("/users/telegram/{telegram_id}/opds")
-def set_telegram_user_opds(
-    telegram_id: int,
-    opds_url: str = Body(..., embed=True),
-):
     # На первом шаге настройки пользователя ещё может не быть.
     if get_user(telegram_id) is None:
         create_user(telegram_id)
