@@ -9,7 +9,7 @@ class Book(BaseModel):
     url: str
 
 class SendBookRequest(BaseModel):
-    email: str
+    emails: str
     book: Book
 
 class TelegramUser(BaseModel):

@@ -1,43 +1,52 @@
-
 import requests
 from lxml import etree
+from urllib.parse import urljoin
+
 from app.models import Book
 
 
-def search_opds(url, query):
+def search_opds(url: str, query: str) -> list[Book]:
     books = []
 
     response = requests.get(
-        f"{url}search",
+        urljoin(url, "search"),
         params={
             "searchType": "books",
             "searchTerm": query,
         },
-    timeout = 15
+        timeout=15,
     )
     response.raise_for_status()
+
     root = etree.fromstring(response.content)
-    #  Ищем все теги <entry> в документе с помощью XPath
-    entries = root.xpath('//*[local-name()="entry"]')
+
+    entries = root.xpath(
+        '//*[local-name()="entry"]'
+    )
+
     for entry in entries:
-        title_element = entry.xpath('./*[local-name()="title"]/text()')
-        author_element = entry.xpath('./*[local-name()="author"]/*[local-name()="name"]/text()')
-
-        title = title_element[0]
-        author = author_element[0]
-
-        epub_link = entry.xpath(
-            './*[local-name()="link"][@type="application/epub+zip"]/@href'
+        title_element = entry.xpath(
+            './*[local-name()="title"]/text()'
+        )
+        author_element = entry.xpath(
+            './*[local-name()="author"]'
+            '/*[local-name()="name"]/text()'
         )
 
-        if epub_link:
-            download_url = "https://flibusta.is" + epub_link[0]
-            books.append(
-                Book(
-                    author=author,
-                    title=title,
-                    url=download_url,
-                )
-            )
-    return books
+        epub_link = entry.xpath(
+            './*[local-name()="link"]'
+            '[@type="application/epub+zip"]/@href'
+        )
 
+        if not title_element or not author_element or not epub_link:
+            continue
+
+        books.append(
+            Book(
+                author=author_element[0],
+                title=title_element[0],
+                url=urljoin(url, epub_link[0]),
+            )
+        )
+
+    return books

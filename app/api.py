@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Body, HTTPException
-from typing import List
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from app.models import  SearchRequest, SendBookRequest, TelegramUser
 from app.services.opds import search_opds, Book
 from app.services.book_delivery import deliver_book
 from app.config import DEFAULT_OPDS_URL
+from app.services.download import download_book, remove_book
+from app.services.mail import send_file
 
 from app.db.users import (
     create_user,
@@ -23,30 +26,55 @@ def health():
 
 
 
-@router.post("/search", response_model=List[Book])
-async def search(data: SearchRequest):
+@router.post("/search", response_model=list[Book])
+def search(data: SearchRequest):
+    user = get_user(data.telegram_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Пользователь не найден",
+        )
+
+    opds_url = user["opds_url"] or DEFAULT_OPDS_URL
+
     return search_opds(
-        DEFAULT_OPDS_URL,
+        opds_url,
         data.query,
     )
 
 
 @router.post("/send-book")
-async def process_data(data: SendBookRequest):
-    deliver_book(
-        recipient_email=data.email,
-        book=data.book,
-    )
+def process_data(data: SendBookRequest):
+    path = download_book(data.book)
 
-    return {
-        "status": "ok"
-    }
+    try:
+        emails = [
+            email.strip()
+            for email in data.emails.split(",")
+            if email.strip()
+        ]
 
+        for email in emails:
+            send_file(
+                recipient_email=email,
+                file_path=path,
+            )
 
-@router.get(
-    "/users/telegram/{telegram_id}",
-    response_model=TelegramUser,
-)
+        return FileResponse(
+            path=path,
+            filename=os.path.basename(path),
+            media_type="application/octet-stream",
+            background=BackgroundTask(
+                remove_book,
+                path,
+            ),
+        )
+
+    except Exception:
+        remove_book(path)
+        raise
+
 def get_telegram_user(telegram_id: int):
     user = get_user(telegram_id)
 
