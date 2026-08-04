@@ -1,4 +1,4 @@
-import requests
+mport requests
 from lxml import etree
 from urllib.parse import urljoin
 
@@ -46,28 +46,28 @@ def search_opds(
             break
 
         for entry in entries:
-            title = entry.xpath(
+            title_values = entry.xpath(
                 './*[local-name()="title"]/text()'
-            )[0]
+            )
 
-            author = entry.xpath(
+            author_values = entry.xpath(
                 './*[local-name()="author"]'
                 '/*[local-name()="name"]/text()'
-            )[0]
+            )
 
-            epub_link = entry.xpath(
+            epub_links = entry.xpath(
                 './*[local-name()="link"]'
                 '[@type="application/epub+zip"]/@href'
             )
 
-            if not epub_link:
+            if not title_values or not epub_links:
                 continue
 
             books.append(
                 Book(
-                    author=author,
-                    title=title,
-                    url=urljoin(url, epub_link[0]),
+                    author=author_values[0] if author_values else "",
+                    title=title_values[0],
+                    url=urljoin(url, epub_links[0]),
                 )
             )
 
