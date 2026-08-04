@@ -28,6 +28,7 @@ def search_opds(url: str, query: str) -> list[Book]:
         title_element = entry.xpath(
             './*[local-name()="title"]/text()'
         )
+
         author_element = entry.xpath(
             './*[local-name()="author"]'
             '/*[local-name()="name"]/text()'
@@ -38,12 +39,18 @@ def search_opds(url: str, query: str) -> list[Book]:
             '[@type="application/epub+zip"]/@href'
         )
 
-        if not title_element or not author_element or not epub_link:
+        if not title_element or not epub_link:
             continue
+
+        author = (
+            author_element[0]
+            if author_element
+            else "Автор неизвестен"
+        )
 
         books.append(
             Book(
-                author=author_element[0],
+                author=author,
                 title=title_element[0],
                 url=urljoin(url, epub_link[0]),
             )
