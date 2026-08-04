@@ -18,7 +18,7 @@ class Book(BaseModel):
 
 class TelegramUser(BaseModel):
     id: int
-    telegram_id: str
+    telegram_id: int
     opds_url: str
-    emails: str
+    emails: str | None = None
     subject: str | None = None

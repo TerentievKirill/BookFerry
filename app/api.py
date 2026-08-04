@@ -108,7 +108,28 @@ def process_data(data: SendBookRequest):
     response_model=TelegramUser,
 )
 def get_telegram_user(telegram_id: int):
-    # На первом шаге настройки пользователя ещё может не быть.
+    user = get_user(telegram_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Пользователь Telegram не найден",
+        )
+
+    return TelegramUser(
+        id=user["id"],
+        telegram_id=user["telegram_id"],
+        opds_url=user["opds_url"],
+        emails=user["emails"],
+        subject=user["subject"],
+    )
+
+
+@router.patch("/users/telegram/{telegram_id}/opds")
+def set_telegram_user_opds(
+    telegram_id: int,
+    opds_url: str = Body(..., embed=True),
+):
     if get_user(telegram_id) is None:
         create_user(telegram_id)
 
@@ -127,7 +148,6 @@ def get_telegram_user(telegram_id: int):
         "status": "ok",
         "opds_url": opds_url.strip(),
     }
-
 
 @router.patch("/users/telegram/{telegram_id}/emails")
 def set_telegram_user_emails(
