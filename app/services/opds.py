@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 from app.models import Book
 
 
-MAX_BOOKS = 60
+MAX_BOOKS = 300
 
 
 def search_opds(
