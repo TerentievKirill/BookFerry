@@ -5,34 +5,45 @@ from urllib.parse import urljoin
 from app.models import Book
 
 
+MAX_BOOKS = 60
+
+
 def search_opds(
     url: str,
     query: str,
 ) -> list[Book]:
-    books = []
-    search_url = f"{url.rstrip('/')}/search"
+    books: list[Book] = []
 
-    for page_number in range(10):
+    next_url: str | None = f"{url.rstrip('/')}/search"
+    params: dict | None = {
+        "searchType": "books",
+        "searchTerm": query,
+    }
+
+    visited_urls: set[str] = set()
+
+    while next_url and len(books) < MAX_BOOKS:
+        # Защита от ситуации, если OPDS начнёт возвращать
+        # одну и ту же ссылку rel="next".
+        if next_url in visited_urls:
+            break
+
+        visited_urls.add(next_url)
+
         try:
             response = requests.get(
-                search_url,
-                params={
-                    "searchType": "books",
-                    "searchTerm": query,
-                    "pageNumber": page_number,
-                },
+                next_url,
+                params=params,
                 timeout=15,
             )
             response.raise_for_status()
 
         except requests.RequestException:
-            # Если предыдущие страницы уже загрузились,
-            # возвращаем найденные книги.
+            # Если уже что-то нашли — возвращаем частичный результат.
             if books:
                 break
 
-            # Если не загрузилась даже первая страница,
-            # передаём ошибку обработчику API.
+            # Если сломалась первая же страница — отдаём ошибку наверх.
             raise
 
         root = etree.fromstring(response.content)
@@ -41,7 +52,6 @@ def search_opds(
             '//*[local-name()="entry"]'
         )
 
-        # Следующих страниц с книгами уже нет.
         if not entries:
             break
 
@@ -65,10 +75,30 @@ def search_opds(
 
             books.append(
                 Book(
-                    author=author_values[0] if author_values else "",
-                    title=title_values[0],
+                    author=(
+                        author_values[0].strip()
+                        if author_values
+                        else ""
+                    ),
+                    title=title_values[0].strip(),
                     url=urljoin(url, epub_links[0]),
                 )
             )
+
+            if len(books) >= MAX_BOOKS:
+                break
+
+        next_links = root.xpath(
+            '//*[local-name()="link"]'
+            '[@rel="next"]/@href'
+        )
+
+        if not next_links:
+            break
+
+        next_url = urljoin(url, next_links[0])
+
+        # В ссылке rel="next" параметры уже указаны самой Flibusta.
+        params = None
 
     return books
