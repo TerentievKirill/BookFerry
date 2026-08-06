@@ -1,74 +1,101 @@
+from urllib.parse import urljoin, urlparse
+
 import requests
 from lxml import etree
-from urllib.parse import urljoin
 
 from app.models import Book
+
+
+def _validate_page_url(
+    opds_url: str,
+    page_url: str,
+) -> None:
+    opds = urlparse(opds_url)
+    page = urlparse(page_url)
+
+    if (
+        page.scheme not in {"http", "https"}
+        or page.netloc != opds.netloc
+    ):
+        raise ValueError(
+            "Некорректная ссылка следующей страницы"
+        )
 
 
 def search_opds(
     url: str,
     query: str,
-) -> list[Book]:
+    page_url: str | None = None,
+) -> tuple[list[Book], str | None]:
+    if page_url:
+        _validate_page_url(url, page_url)
+        request_url = page_url
+        params = None
+    else:
+        request_url = f"{url.rstrip('/')}/search"
+        params = {
+            "searchType": "books",
+            "searchTerm": query,
+        }
+
+    response = requests.get(
+        request_url,
+        params=params,
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    root = etree.fromstring(response.content)
+
+    next_links = root.xpath(
+        '/*[local-name()="feed"]'
+        '/*[local-name()="link"]'
+        '[@rel="next"]/@href'
+    )
+
+    next_page_url = (
+        urljoin(response.url, next_links[0])
+        if next_links
+        else None
+    )
+
     books = []
-    search_url = f"{url.rstrip('/')}/search"
 
-    for page_number in range(10):
-        try:
-            response = requests.get(
-                search_url,
-                params={
-                    "searchType": "books",
-                    "searchTerm": query,
-                    "pageNumber": page_number,
-                },
-                timeout=15,
-            )
-            response.raise_for_status()
+    entries = root.xpath(
+        '//*[local-name()="entry"]'
+    )
 
-        except requests.RequestException:
-            # Если предыдущие страницы уже загрузились,
-            # возвращаем найденные книги.
-            if books:
-                break
-
-            # Если не загрузилась даже первая страница,
-            # передаём ошибку обработчику API.
-            raise
-
-        root = etree.fromstring(response.content)
-
-        entries = root.xpath(
-            '//*[local-name()="entry"]'
+    for entry in entries:
+        title_values = entry.xpath(
+            './*[local-name()="title"]/text()'
         )
 
-        # Следующих страниц с книгами уже нет.
-        if not entries:
-            break
+        author_values = entry.xpath(
+            './*[local-name()="author"]'
+            '/*[local-name()="name"]/text()'
+        )
 
-        for entry in entries:
-            title_values = entry.xpath(
-                './*[local-name()="title"]/text()'
+        epub_links = entry.xpath(
+            './*[local-name()="link"]'
+            '[@type="application/epub+zip"]/@href'
+        )
+
+        if not title_values or not epub_links:
+            continue
+
+        books.append(
+            Book(
+                author=(
+                    author_values[0]
+                    if author_values
+                    else ""
+                ),
+                title=title_values[0],
+                url=urljoin(
+                    response.url,
+                    epub_links[0],
+                ),
             )
+        )
 
-            author_values = entry.xpath(
-                './*[local-name()="author"]'
-                '/*[local-name()="name"]/text()'
-            )
-
-            epub_links = entry.xpath(
-                './*[local-name()="link"]'
-                '[@type="application/epub+zip"]/@href'
-            )
-
-            if not title_values or not epub_links:
-                continue
-
-            books.append(
-                Book(
-                    author=author_values[0] if author_values else "",
-                    title=title_values[0],
-                    url=urljoin(url, epub_links[0]),
-                )
-            )
-
-    return books
+    return books, next_page_url
