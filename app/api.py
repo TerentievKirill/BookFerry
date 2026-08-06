@@ -15,6 +15,7 @@ from app.db.users import (
 from app.models import (
     Book,
     SearchRequest,
+    SearchResponse,
     SendBookRequest,
     TelegramUser,
 )
@@ -22,13 +23,6 @@ from app.services.download import download_book, remove_book
 from app.services.mail import send_file
 from app.services.opds import search_opds
 
-from app.db.users import (
-    create_user,
-    get_user,
-    update_email,
-    update_opds,
-    update_subject,
-)
 
 router = APIRouter()
 
@@ -38,8 +32,10 @@ def health():
     return {"status": "ok"}
 
 
-
-@router.post("/search", response_model=list[Book])
+@router.post(
+    "/search",
+    response_model=SearchResponse,
+)
 def search(data: SearchRequest):
     user = get_user(data.telegram_id)
 
@@ -51,9 +47,21 @@ def search(data: SearchRequest):
 
     opds_url = user["opds_url"] or DEFAULT_OPDS_URL
 
-    return search_opds(
-        opds_url,
-        data.query,
+    try:
+        books, next_page_url = search_opds(
+            url=opds_url,
+            query=data.query,
+            page_url=data.page_url,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    return SearchResponse(
+        books=books,
+        next_page_url=next_page_url,
     )
 
 
@@ -149,6 +157,7 @@ def set_telegram_user_opds(
         "opds_url": opds_url.strip(),
     }
 
+
 @router.patch("/users/telegram/{telegram_id}/emails")
 def set_telegram_user_emails(
     telegram_id: int,
@@ -180,7 +189,10 @@ def set_telegram_user_emails(
 @router.patch("/users/telegram/{telegram_id}/subject")
 def set_telegram_user_subject(
     telegram_id: int,
-    subject: str | None = Body(default=None, embed=True),
+    subject: str | None = Body(
+        default=None,
+        embed=True,
+    ),
 ):
     if get_user(telegram_id) is None:
         raise HTTPException(
@@ -188,7 +200,11 @@ def set_telegram_user_subject(
             detail="Пользователь Telegram не найден",
         )
 
-    normalized_subject = subject.strip() if subject else None
+    normalized_subject = (
+        subject.strip()
+        if subject
+        else None
+    )
 
     updated = update_subject(
         telegram_id=telegram_id,
