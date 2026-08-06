@@ -41,7 +41,7 @@ def search_opds(
     response = requests.get(
         request_url,
         params=params,
-        timeout=15,
+        timeout=180,
     )
     response.raise_for_status()
 
