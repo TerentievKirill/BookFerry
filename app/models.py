@@ -43,6 +43,7 @@ class User(BaseModel):
     client_type: ClientType
     external_id: str | None = None
     catalog_id: int
+    opds_url: str | None = None
     emails: str | None = None
     subject: str | None = None
     created_at: str
@@ -65,6 +66,10 @@ class RegisterUserRequest(BaseModel):
 
 class CatalogUpdate(BaseModel):
     catalog_id: int
+
+
+class OpdsUpdate(BaseModel):
+    opds_url: str
 
 
 class EmailsUpdate(BaseModel):
