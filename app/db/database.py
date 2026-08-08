@@ -6,9 +6,9 @@ from app.config import DB_NAME, DEFAULT_OPDS_URL
 
 CATALOGS = (
     ("gutenberg", "Project Gutenberg", "https://www.gutenberg.org/ebooks.opds/", 1),
-    ("anarchist", "The Anarchist Library", "https://theanarchistlibrary.org/", 2),
+    ("anarchist", "The Anarchist Library", "https://theanarchistlibrary.org/opds", 2),
     ("flibusta", "Flibusta", DEFAULT_OPDS_URL or "https://flibusta.is/opds/", 3),
-    ("anarchist_ru", "Библиотека Анархизма", "https://ru.anarchistlibraries.net/", 4),
+    ("anarchist_ru", "Библиотека Анархизма", "https://ru.anarchistlibraries.net/opds", 4),
 )
 
 
