@@ -1,25 +1,60 @@
+import os
+import re
+from urllib.parse import unquote, urlparse
 
 import requests
-import os
 
+from app.services.safe_http import safe_get
+
+
+def _filename_from_response(response: requests.Response) -> str:
+    content_disposition = response.headers.get("Content-Disposition", "")
+
+    if content_disposition:
+        match = re.search(
+            r"filename\*?=(?:UTF-8''|\")?([^\";]+)",
+            content_disposition,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            filename = unquote(match.group(1).strip().strip('"'))
+            if filename:
+                return os.path.basename(filename)
+
+    final_name = unquote(os.path.basename(urlparse(response.url).path))
+
+    if final_name.lower().endswith(".epub"):
+        return final_name
+
+    if final_name:
+        return f"{final_name}.epub"
+
+    return "book.epub"
 
 
 def download_book(url: str) -> str:
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
+    response = safe_get(
+        url,
+        timeout=(10, 120),
+    )
+
+    try:
+        response.raise_for_status()
+        filename = _filename_from_response(response)
+        content = response.content
+    finally:
+        response.close()
 
     temp_dir = os.path.join(os.getcwd(), "Temp")
     os.makedirs(temp_dir, exist_ok=True)
 
-    raw_header = response.headers["Content-Disposition"]
-    filename = raw_header.split("filename=")[1].strip('"')
-
     path = os.path.join(temp_dir, filename)
 
     with open(path, "wb") as file:
-        file.write(response.content)
+        file.write(content)
 
     return path
+
 
 def remove_book(path):
     if os.path.exists(path):

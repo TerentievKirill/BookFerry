@@ -1,6 +1,7 @@
 import os
 
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 
@@ -13,6 +14,10 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 DEFAULT_SUBJECT = os.getenv("DEFAULT_SUBJECT")
 
 DB_NAME = os.getenv("DB_NAME", "bookferry.db")
+CATALOG_DB_NAME = os.getenv(
+    "CATALOG_DB_NAME",
+    str(Path(DB_NAME).with_name("catalog.db")),
+)
 
 DEFAULT_OPDS_URL = os.getenv("DEFAULT_OPDS_URL")
 

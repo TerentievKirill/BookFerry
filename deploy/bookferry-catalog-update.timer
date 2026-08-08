@@ -1,0 +1,11 @@
+[Unit]
+Description=Run BookFerry catalog update daily at 03:00 Asia/Almaty
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Almaty
+Persistent=true
+AccuracySec=1min
+Unit=bookferry-catalog-update.service
+
+[Install]
+WantedBy=timers.target
