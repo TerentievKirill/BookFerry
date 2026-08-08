@@ -22,7 +22,7 @@ from scripts.catalog_utils import (
 
 
 CATALOG_CODE = "anarchist"
-DEFAULT_OPDS_URL = "https://theanarchistlibrary.org/opds/crawlable"
+DEFAULT_OPDS_URL = "https://theanarchistlibrary.org/opds/titles/1"
 BATCH_SIZE = 1000
 MAX_PAGES = 10000
 
@@ -230,7 +230,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         default=DEFAULT_OPDS_URL,
-        help="OPDS URL The Anarchist Library",
+        help="Первая страница списка текстов OPDS The Anarchist Library",
     )
     args = parser.parse_args()
 
