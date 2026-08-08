@@ -98,6 +98,8 @@ def log_event(
     logger: logging.Logger,
     request: Request,
     event: str,
+    *,
+    level: int = logging.INFO,
     **fields,
 ) -> None:
     parts = [
@@ -108,7 +110,7 @@ def log_event(
         f"{key}={_format_field(value)}"
         for key, value in fields.items()
     )
-    logger.info(" ".join(parts))
+    logger.log(level, " ".join(parts))
 
 
 async def request_logging_middleware(request: Request, call_next):
