@@ -62,6 +62,8 @@ def _create_users(cursor):
             client_type TEXT NOT NULL,
             external_id TEXT,
             catalog_id INTEGER NOT NULL,
+            custom_opds_url TEXT,
+            custom_opds_search_template TEXT,
             emails TEXT,
             subject TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
