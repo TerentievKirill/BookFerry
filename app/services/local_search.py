@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from app.db.catalog_database import get_catalog_connection
 from app.models import Book
@@ -45,13 +45,43 @@ def _fts_query(query: str) -> str | None:
     )
 
 
-def _flibusta_epub_url(base_url: str, external_id: str) -> str:
+def _origin(base_url: str) -> tuple[str, str]:
     parsed = urlparse(base_url)
 
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Некорректный адрес каталога Flibusta")
+        raise ValueError("Некорректный адрес каталога")
 
-    return f"{parsed.scheme}://{parsed.netloc}/b/{external_id}/epub"
+    return parsed.scheme, parsed.netloc
+
+
+def _flibusta_epub_url(base_url: str, external_id: str) -> str:
+    scheme, netloc = _origin(base_url)
+    return f"{scheme}://{netloc}/b/{external_id}/epub"
+
+
+def _gutenberg_epub_url(base_url: str, external_id: str) -> str:
+    if not external_id.isdigit():
+        raise ValueError("Некорректный ID Project Gutenberg")
+
+    scheme, netloc = _origin(base_url)
+    return f"{scheme}://{netloc}/ebooks/{external_id}.epub3.images"
+
+
+def _wikisource_epub_url(base_url: str, external_id: str) -> str:
+    _, netloc = _origin(base_url)
+
+    if not netloc.endswith(".wikisource.org"):
+        raise ValueError("Некорректный адрес Wikisource")
+
+    language = netloc.split(".", 1)[0]
+    query = urlencode(
+        {
+            "format": "epub",
+            "lang": language,
+            "page": external_id,
+        }
+    )
+    return f"https://ws-export.wmcloud.org/?{query}"
 
 
 def _download_url(
@@ -61,6 +91,12 @@ def _download_url(
 ) -> str:
     if catalog_code == "flibusta":
         return _flibusta_epub_url(base_url, external_id)
+
+    if catalog_code == "gutenberg":
+        return _gutenberg_epub_url(base_url, external_id)
+
+    if catalog_code == "wikisource":
+        return _wikisource_epub_url(base_url, external_id)
 
     raise ValueError(f"Скачивание из каталога {catalog_code} пока не поддерживается")
 
