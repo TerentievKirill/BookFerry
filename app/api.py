@@ -1,6 +1,7 @@
-import sqlite3
 import os
+import sqlite3
 
+import requests
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
@@ -14,7 +15,9 @@ from app.db.users import (
     update_email,
     update_subject,
     update_telegram_catalog,
+    update_telegram_custom_opds,
     update_user_catalog,
+    update_user_custom_opds,
     update_user_emails,
     update_user_subject,
 )
@@ -22,6 +25,7 @@ from app.models import (
     Catalog,
     CatalogUpdate,
     EmailsUpdate,
+    OpdsUpdate,
     RegisterUserRequest,
     SearchRequest,
     SearchResponse,
@@ -33,6 +37,7 @@ from app.models import (
 from app.services.download import download_book, remove_book
 from app.services.local_search import search_local_catalog
 from app.services.mail import send_file
+from app.services.opds import inspect_opds, search_opds
 
 
 router = APIRouter()
@@ -41,6 +46,43 @@ router = APIRouter()
 @router.get("/health")
 def health():
     return {"status": "ok"}
+
+
+def _active_catalog(catalog_id: int):
+    catalog = get_catalog(catalog_id)
+    if catalog is None or not catalog["enabled"]:
+        raise HTTPException(
+            status_code=404,
+            detail="Активный каталог не найден",
+        )
+    return catalog
+
+
+def _catalog_by_base_url(opds_url: str):
+    normalized = opds_url.strip().rstrip("/")
+    return next(
+        (
+            item
+            for item in get_catalogs()
+            if item["base_url"].strip().rstrip("/") == normalized
+        ),
+        None,
+    )
+
+
+def _inspect_custom_opds(opds_url: str) -> tuple[str, str]:
+    try:
+        return inspect_opds(opds_url)
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Не удалось открыть OPDS: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
 
 
 @router.post(
@@ -56,21 +98,27 @@ def search(data: SearchRequest):
             detail="Пользователь не найден",
         )
 
-    catalog = get_catalog(user["catalog_id"])
-
-    if catalog is None or not catalog["enabled"]:
-        raise HTTPException(
-            status_code=404,
-            detail="Активный каталог не найден",
-        )
-
     try:
-        books, next_page_url = search_local_catalog(
-            catalog_code=catalog["code"],
-            base_url=catalog["base_url"],
-            query=data.query,
-            page_token=data.page_url,
-        )
+        if user["custom_opds_url"]:
+            books, next_page_url = search_opds(
+                url=user["custom_opds_url"],
+                query=data.query,
+                page_url=data.page_url,
+                search_template=user["custom_opds_search_template"],
+            )
+        else:
+            catalog = _active_catalog(user["catalog_id"])
+            books, next_page_url = search_local_catalog(
+                catalog_code=catalog["code"],
+                base_url=catalog["base_url"],
+                query=data.query,
+                page_token=data.page_url,
+            )
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OPDS-каталог недоступен: {error}",
+        ) from error
     except ValueError as error:
         raise HTTPException(
             status_code=400,
@@ -99,7 +147,18 @@ def process_data(data: SendBookRequest):
             detail="У пользователя не указан email",
         )
 
-    path = download_book(data.url)
+    try:
+        path = download_book(data.url)
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Не удалось скачать книгу: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
 
     try:
         emails = [
@@ -158,26 +217,50 @@ def set_telegram_user_opds(
     telegram_id: int,
     opds_url: str = Body(..., embed=True),
 ):
-    """Legacy route: only URLs of supported catalogs are accepted."""
-    catalog = next(
-        (item for item in get_catalogs() if item["base_url"] == opds_url.strip()),
-        None,
-    )
-    if catalog is None:
-        raise HTTPException(status_code=400, detail="Каталог не поддерживается")
     if get_user(telegram_id) is None:
         create_user(telegram_id)
-    update_telegram_catalog(telegram_id, catalog["id"])
-    return {"status": "ok", "opds_url": catalog["base_url"]}
+
+    builtin = _catalog_by_base_url(opds_url)
+    if builtin is not None:
+        update_telegram_catalog(telegram_id, builtin["id"])
+        return {
+            "status": "ok",
+            "mode": "catalog",
+            "catalog_id": builtin["id"],
+            "opds_url": builtin["base_url"],
+        }
+
+    final_url, search_template = _inspect_custom_opds(opds_url.strip())
+
+    if not update_telegram_custom_opds(
+        telegram_id=telegram_id,
+        opds_url=final_url,
+        search_template=search_template,
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось сохранить пользовательский OPDS",
+        )
+
+    return {
+        "status": "ok",
+        "mode": "custom",
+        "opds_url": final_url,
+    }
 
 
 @router.patch("/users/telegram/{telegram_id}/catalog")
 def set_telegram_user_catalog(telegram_id: int, data: CatalogUpdate):
     if get_user(telegram_id) is None:
-        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+        create_user(telegram_id)
+
     catalog = _active_catalog(data.catalog_id)
     update_telegram_catalog(telegram_id, catalog["id"])
-    return {"status": "ok", "catalog_id": catalog["id"]}
+    return {
+        "status": "ok",
+        "catalog_id": catalog["id"],
+        "opds_url": catalog["base_url"],
+    }
 
 
 @router.patch("/users/telegram/{telegram_id}/emails")
@@ -245,13 +328,6 @@ def set_telegram_user_subject(
     }
 
 
-def _active_catalog(catalog_id: int):
-    catalog = get_catalog(catalog_id)
-    if catalog is None or not catalog["enabled"]:
-        raise HTTPException(status_code=404, detail="Активный каталог не найден")
-    return catalog
-
-
 @router.get("/catalogs", response_model=list[Catalog])
 def list_catalogs():
     return [dict(catalog) for catalog in get_catalogs()]
@@ -264,7 +340,10 @@ def create_generic_user(data: RegisterUserRequest):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except sqlite3.IntegrityError as error:
-        raise HTTPException(status_code=409, detail="Пользователь уже существует") from error
+        raise HTTPException(
+            status_code=409,
+            detail="Пользователь уже существует",
+        ) from error
     return User(**dict(user))
 
 
@@ -282,7 +361,45 @@ def set_user_catalog(uid: str, data: CatalogUpdate):
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     catalog = _active_catalog(data.catalog_id)
     update_user_catalog(uid, catalog["id"])
-    return {"status": "ok", "catalog_id": catalog["id"]}
+    return {
+        "status": "ok",
+        "catalog_id": catalog["id"],
+        "opds_url": catalog["base_url"],
+    }
+
+
+@router.patch("/users/{uid}/opds")
+def set_user_opds(uid: str, data: OpdsUpdate):
+    if get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    builtin = _catalog_by_base_url(data.opds_url)
+    if builtin is not None:
+        update_user_catalog(uid, builtin["id"])
+        return {
+            "status": "ok",
+            "mode": "catalog",
+            "catalog_id": builtin["id"],
+            "opds_url": builtin["base_url"],
+        }
+
+    final_url, search_template = _inspect_custom_opds(data.opds_url.strip())
+
+    if not update_user_custom_opds(
+        uid=uid,
+        opds_url=final_url,
+        search_template=search_template,
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось сохранить пользовательский OPDS",
+        )
+
+    return {
+        "status": "ok",
+        "mode": "custom",
+        "opds_url": final_url,
+    }
 
 
 @router.patch("/users/{uid}/emails")
