@@ -9,19 +9,19 @@ from app.models import Book
 from app.services.safe_http import safe_get, validate_public_url
 
 
-XML_PARSER = etree.XMLParser(
-    resolve_entities=False,
-    no_network=True,
-    recover=False,
-)
-
-SEARCH_REL = "search"
 OPENSEARCH_TYPE = "application/opensearchdescription+xml"
+SEARCH_TERMS_PATTERN = re.compile(r"\{searchTerms\??\}")
 
 
 def _parse_xml(content: bytes, error_message: str):
+    parser = etree.XMLParser(
+        resolve_entities=False,
+        no_network=True,
+        recover=False,
+    )
+
     try:
-        return etree.fromstring(content, parser=XML_PARSER)
+        return etree.fromstring(content, parser=parser)
     except etree.XMLSyntaxError as error:
         raise ValueError(error_message) from error
 
@@ -76,7 +76,7 @@ def _search_template_from_description(description_url: str) -> str:
 
         if (
             "application/atom+xml" in media_type
-            and "{searchTerms}" in template
+            and SEARCH_TERMS_PATTERN.search(template)
         ):
             normalized = urljoin(description_url, template)
             _render_search_template(normalized, "bookferry")
@@ -119,7 +119,7 @@ def inspect_opds(opds_url: str) -> tuple[str, str]:
 
         target = urljoin(final_url, href)
 
-        if "{searchTerms}" in target:
+        if SEARCH_TERMS_PATTERN.search(target):
             _render_search_template(target, "bookferry")
             return final_url, target
 
@@ -155,9 +155,6 @@ def _parse_books(root, response_url: str) -> list[Book]:
         if not title_values or not epub_links:
             continue
 
-        epub_url = urljoin(response_url, epub_links[0])
-        validate_public_url(epub_url)
-
         books.append(
             Book(
                 author=", ".join(
@@ -166,7 +163,7 @@ def _parse_books(root, response_url: str) -> list[Book]:
                     if value.strip()
                 ),
                 title=title_values[0].strip(),
-                url=epub_url,
+                url=urljoin(response_url, epub_links[0]),
             )
         )
 
