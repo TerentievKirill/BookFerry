@@ -1,4 +1,4 @@
-mport sqlite3
+import sqlite3
 from contextlib import contextmanager
 
 from app.config import CATALOG_DB_NAME
