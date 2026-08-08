@@ -8,6 +8,7 @@ CATALOGS = (
     ("gutenberg", "Project Gutenberg", "https://www.gutenberg.org/ebooks.opds/", 1),
     ("anarchist", "The Anarchist Library", "https://theanarchistlibrary.org/", 2),
     ("flibusta", "Flibusta", DEFAULT_OPDS_URL or "https://flibusta.is/opds/", 3),
+    ("anarchist_ru", "Библиотека Анархизма", "https://ru.anarchistlibraries.net/", 4),
 )
 
 
