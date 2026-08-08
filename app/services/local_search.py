@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 from app.db.catalog_database import get_catalog_connection
 from app.models import Book
@@ -67,21 +67,13 @@ def _gutenberg_epub_url(base_url: str, external_id: str) -> str:
     return f"{scheme}://{netloc}/ebooks/{external_id}.epub3.images"
 
 
-def _wikisource_epub_url(base_url: str, external_id: str) -> str:
-    _, netloc = _origin(base_url)
+def _anarchist_epub_url(base_url: str, external_id: str) -> str:
+    scheme, netloc = _origin(base_url)
 
-    if not netloc.endswith(".wikisource.org"):
-        raise ValueError("Некорректный адрес Wikisource")
+    if "/" in external_id or not external_id:
+        raise ValueError("Некорректный ID The Anarchist Library")
 
-    language = netloc.split(".", 1)[0]
-    query = urlencode(
-        {
-            "format": "epub",
-            "lang": language,
-            "page": external_id,
-        }
-    )
-    return f"https://ws-export.wmcloud.org/?{query}"
+    return f"{scheme}://{netloc}/library/{external_id}.epub"
 
 
 def _download_url(
@@ -95,8 +87,8 @@ def _download_url(
     if catalog_code == "gutenberg":
         return _gutenberg_epub_url(base_url, external_id)
 
-    if catalog_code == "wikisource":
-        return _wikisource_epub_url(base_url, external_id)
+    if catalog_code == "anarchist":
+        return _anarchist_epub_url(base_url, external_id)
 
     raise ValueError(f"Скачивание из каталога {catalog_code} пока не поддерживается")
 
