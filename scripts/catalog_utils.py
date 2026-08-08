@@ -50,6 +50,7 @@ def open_catalog_rebuild(
                 """,
                 (replace_catalog_code,),
             )
+            conn.commit()
         finally:
             conn.execute("DETACH DATABASE current_catalog")
 
