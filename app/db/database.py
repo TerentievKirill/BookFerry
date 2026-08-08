@@ -6,7 +6,7 @@ from app.config import DB_NAME, DEFAULT_OPDS_URL
 
 CATALOGS = (
     ("gutenberg", "Project Gutenberg", "https://www.gutenberg.org/ebooks.opds/", 1),
-    ("wikisource", "Викитека", "https://ru.wikisource.org/", 2),
+    ("anarchist", "The Anarchist Library", "https://theanarchistlibrary.org/", 2),
     ("flibusta", "Flibusta", DEFAULT_OPDS_URL or "https://flibusta.is/opds/", 3),
 )
 
@@ -41,8 +41,12 @@ def _create_catalogs(cursor):
     )
     cursor.executemany(
         """
-        INSERT OR IGNORE INTO catalogs (code, name, base_url, sort_order)
+        INSERT INTO catalogs (code, name, base_url, sort_order)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(code) DO UPDATE SET
+            name = excluded.name,
+            base_url = excluded.base_url,
+            sort_order = excluded.sort_order
         """,
         CATALOGS,
     )
