@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -14,7 +13,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import CATALOG_DB_NAME
-from app.db.catalog_database import create_catalog_schema
+from scripts.catalog_utils import (
+    abort_catalog_rebuild,
+    finish_catalog_rebuild,
+    open_catalog_rebuild,
+)
 
 
 BATCH_SIZE = 5000
@@ -371,18 +374,6 @@ def fill_book_authors(conn: sqlite3.Connection) -> None:
     print("Авторы книг собраны")
 
 
-def rebuild_fts(conn: sqlite3.Connection) -> None:
-    print("Строю FTS5 индекс...")
-    conn.execute(
-        """
-        INSERT INTO books_fts(books_fts)
-        VALUES ('rebuild')
-        """
-    )
-    conn.execute("ANALYZE")
-    print("FTS5 индекс готов")
-
-
 def build_catalog(
     sql_dir: Path,
     catalog_db: Path,
@@ -395,20 +386,12 @@ def build_catalog(
         if not path.is_file():
             raise FileNotFoundError(f"Не найден файл: {path}")
 
-    catalog_db.parent.mkdir(parents=True, exist_ok=True)
-    temp_db = catalog_db.with_name(f"{catalog_db.name}.new")
-
-    if temp_db.exists():
-        temp_db.unlink()
-
-    conn = sqlite3.connect(temp_db)
+    conn, temp_db = open_catalog_rebuild(
+        catalog_db=catalog_db,
+        replace_catalog_code="flibusta",
+    )
 
     try:
-        conn.execute("PRAGMA journal_mode = OFF")
-        conn.execute("PRAGMA synchronous = OFF")
-        conn.execute("PRAGMA temp_store = FILE")
-        create_catalog_schema(conn)
-
         import_authors(conn, author_dump)
         conn.commit()
 
@@ -421,25 +404,16 @@ def build_catalog(
         fill_book_authors(conn)
         conn.commit()
 
-        rebuild_fts(conn)
-        conn.commit()
-
         books_count = conn.execute(
             "SELECT COUNT(*) FROM books WHERE catalog_code = 'flibusta'"
         ).fetchone()[0]
-
         print(f"Итого книг Flibusta: {books_count:,}")
 
-    except Exception:
-        conn.close()
-        if temp_db.exists():
-            temp_db.unlink()
-        raise
-    else:
-        conn.close()
+        finish_catalog_rebuild(conn, temp_db, catalog_db)
 
-    os.replace(temp_db, catalog_db)
-    print(f"Готовая база установлена: {catalog_db}")
+    except Exception:
+        abort_catalog_rebuild(conn, temp_db)
+        raise
 
 
 def main() -> None:
