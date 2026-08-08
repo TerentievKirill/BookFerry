@@ -46,15 +46,17 @@ def create_user(telegram_id: int):
         register_user("telegram", str(telegram_id))
         return True
     except sqlite3.IntegrityError:
-        # Preserve the old INSERT OR IGNORE behavior for an existing ID only.
         return False
 
 
 def _select_user(where: str, value, connection=None):
     query = f"""
         SELECT users.id, users.uid, users.client_type, users.external_id,
-               users.catalog_id, users.emails, users.subject, users.created_at,
-               catalogs.base_url AS opds_url
+               users.catalog_id,
+               users.custom_opds_url,
+               users.custom_opds_search_template,
+               users.emails, users.subject, users.created_at,
+               COALESCE(users.custom_opds_url, catalogs.base_url) AS opds_url
         FROM users
         JOIN catalogs ON catalogs.id = users.catalog_id
         WHERE {where}
@@ -107,14 +109,75 @@ def update_user_subject(uid: str, subject: str | None):
     return _update_user("subject", subject, "uid = ?", uid)
 
 
+def _update_catalog(where: str, identity, catalog_id: int) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            f"""
+            UPDATE users
+            SET catalog_id = ?,
+                custom_opds_url = NULL,
+                custom_opds_search_template = NULL
+            WHERE {where}
+            """,
+            (catalog_id, identity),
+        )
+        return cursor.rowcount > 0
+
+
 def update_user_catalog(uid: str, catalog_id: int):
-    return _update_user("catalog_id", catalog_id, "uid = ?", uid)
+    return _update_catalog("uid = ?", uid, catalog_id)
 
 
 def update_telegram_catalog(telegram_id: int, catalog_id: int):
-    return _update_user(
-        "catalog_id", catalog_id,
-        "client_type = 'telegram' AND external_id = ?", str(telegram_id),
+    return _update_catalog(
+        "client_type = 'telegram' AND external_id = ?",
+        str(telegram_id),
+        catalog_id,
+    )
+
+
+def _update_custom_opds(
+    where: str,
+    identity,
+    opds_url: str,
+    search_template: str,
+) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            f"""
+            UPDATE users
+            SET custom_opds_url = ?,
+                custom_opds_search_template = ?
+            WHERE {where}
+            """,
+            (opds_url, search_template, identity),
+        )
+        return cursor.rowcount > 0
+
+
+def update_user_custom_opds(
+    uid: str,
+    opds_url: str,
+    search_template: str,
+) -> bool:
+    return _update_custom_opds(
+        "uid = ?",
+        uid,
+        opds_url,
+        search_template,
+    )
+
+
+def update_telegram_custom_opds(
+    telegram_id: int,
+    opds_url: str,
+    search_template: str,
+) -> bool:
+    return _update_custom_opds(
+        "client_type = 'telegram' AND external_id = ?",
+        str(telegram_id),
+        opds_url,
+        search_template,
     )
 
 
