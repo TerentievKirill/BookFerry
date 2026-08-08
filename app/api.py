@@ -1,23 +1,34 @@
+import sqlite3
 import os
 
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from app.config import DEFAULT_OPDS_URL
+from app.db.catalogs import get_catalog, get_catalogs
 from app.db.users import (
     create_user,
     get_user,
+    get_user_by_uid,
+    register_user,
     update_email,
-    update_opds,
     update_subject,
+    update_telegram_catalog,
+    update_user_catalog,
+    update_user_emails,
+    update_user_subject,
 )
 from app.models import (
-    Book,
+    Catalog,
+    CatalogUpdate,
+    EmailsUpdate,
+    RegisterUserRequest,
     SearchRequest,
     SearchResponse,
     SendBookRequest,
+    SubjectUpdate,
     TelegramUser,
+    User,
 )
 from app.services.download import download_book, remove_book
 from app.services.mail import send_file
@@ -45,11 +56,9 @@ def search(data: SearchRequest):
             detail="Пользователь не найден",
         )
 
-    opds_url = user["opds_url"] or DEFAULT_OPDS_URL
-
     try:
         books, next_page_url = search_opds(
-            url=opds_url,
+            url=user["opds_url"],
             query=data.query,
             page_url=data.page_url,
         )
@@ -126,7 +135,9 @@ def get_telegram_user(telegram_id: int):
 
     return TelegramUser(
         id=user["id"],
-        telegram_id=user["telegram_id"],
+        uid=user["uid"],
+        telegram_id=int(user["external_id"]),
+        catalog_id=user["catalog_id"],
         opds_url=user["opds_url"],
         emails=user["emails"],
         subject=user["subject"],
@@ -138,24 +149,26 @@ def set_telegram_user_opds(
     telegram_id: int,
     opds_url: str = Body(..., embed=True),
 ):
+    """Legacy route: only URLs of supported catalogs are accepted."""
+    catalog = next(
+        (item for item in get_catalogs() if item["base_url"] == opds_url.strip()),
+        None,
+    )
+    if catalog is None:
+        raise HTTPException(status_code=400, detail="Каталог не поддерживается")
     if get_user(telegram_id) is None:
         create_user(telegram_id)
+    update_telegram_catalog(telegram_id, catalog["id"])
+    return {"status": "ok", "opds_url": catalog["base_url"]}
 
-    updated = update_opds(
-        telegram_id=telegram_id,
-        opds_url=opds_url.strip(),
-    )
 
-    if not updated:
-        raise HTTPException(
-            status_code=500,
-            detail="Не удалось сохранить OPDS-каталог",
-        )
-
-    return {
-        "status": "ok",
-        "opds_url": opds_url.strip(),
-    }
+@router.patch("/users/telegram/{telegram_id}/catalog")
+def set_telegram_user_catalog(telegram_id: int, data: CatalogUpdate):
+    if get_user(telegram_id) is None:
+        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+    catalog = _active_catalog(data.catalog_id)
+    update_telegram_catalog(telegram_id, catalog["id"])
+    return {"status": "ok", "catalog_id": catalog["id"]}
 
 
 @router.patch("/users/telegram/{telegram_id}/emails")
@@ -221,3 +234,58 @@ def set_telegram_user_subject(
         "status": "ok",
         "subject": normalized_subject,
     }
+
+
+def _active_catalog(catalog_id: int):
+    catalog = get_catalog(catalog_id)
+    if catalog is None or not catalog["enabled"]:
+        raise HTTPException(status_code=404, detail="Активный каталог не найден")
+    return catalog
+
+
+@router.get("/catalogs", response_model=list[Catalog])
+def list_catalogs():
+    return [dict(catalog) for catalog in get_catalogs()]
+
+
+@router.post("/users/register", response_model=User, status_code=201)
+def create_generic_user(data: RegisterUserRequest):
+    try:
+        user = register_user(data.client_type, data.external_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Пользователь уже существует") from error
+    return User(**dict(user))
+
+
+@router.get("/users/{uid}", response_model=User)
+def get_generic_user(uid: str):
+    user = get_user_by_uid(uid)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return User(**dict(user))
+
+
+@router.patch("/users/{uid}/catalog")
+def set_user_catalog(uid: str, data: CatalogUpdate):
+    if get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    catalog = _active_catalog(data.catalog_id)
+    update_user_catalog(uid, catalog["id"])
+    return {"status": "ok", "catalog_id": catalog["id"]}
+
+
+@router.patch("/users/{uid}/emails")
+def set_user_emails(uid: str, data: EmailsUpdate):
+    if not update_user_emails(uid, data.emails.strip()):
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {"status": "ok", "emails": data.emails.strip()}
+
+
+@router.patch("/users/{uid}/subject")
+def set_user_subject(uid: str, data: SubjectUpdate):
+    subject = data.subject.strip() if data.subject else None
+    if not update_user_subject(uid, subject):
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {"status": "ok", "subject": subject}

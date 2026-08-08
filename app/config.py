@@ -12,8 +12,7 @@ SMTP_LOGIN = os.getenv("SMTP_LOGIN")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 DEFAULT_SUBJECT = os.getenv("DEFAULT_SUBJECT")
 
-DB_NAME = os.getenv("DB_NAME")
+DB_NAME = os.getenv("DB_NAME", "bookferry.db")
 
 DEFAULT_OPDS_URL = os.getenv("DEFAULT_OPDS_URL")
-
 
