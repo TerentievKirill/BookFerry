@@ -21,8 +21,10 @@ from scripts.catalog_utils import (
 )
 
 
-CATALOG_CODE = "anarchist"
+DEFAULT_CATALOG_CODE = "anarchist"
+DEFAULT_CATALOG_NAME = "The Anarchist Library"
 DEFAULT_OPDS_URL = "https://theanarchistlibrary.org/opds/titles/1"
+DEFAULT_LANGUAGE = "en"
 BATCH_SIZE = 1000
 MAX_PAGES = 10000
 
@@ -113,18 +115,24 @@ def fetch_page(session: requests.Session, url: str) -> tuple[ET.Element, str]:
         root = ET.fromstring(response.content)
     except ET.ParseError as error:
         raise ValueError(
-            f"The Anarchist Library вернул невалидный OPDS: {response.url}"
+            f"AmuseWiki вернул невалидный OPDS: {response.url}"
         ) from error
 
     if _local_name(root.tag) != "feed":
         raise ValueError(
-            f"The Anarchist Library вернул не OPDS feed: {response.url}"
+            f"AmuseWiki вернул не OPDS feed: {response.url}"
         )
 
     return root, response.url
 
 
-def import_books(conn, opds_url: str) -> int:
+def import_books(
+    conn,
+    opds_url: str,
+    catalog_code: str,
+    catalog_name: str,
+    default_language: str,
+) -> int:
     sql = """
         INSERT OR IGNORE INTO books (
             catalog_code,
@@ -133,12 +141,12 @@ def import_books(conn, opds_url: str) -> int:
             author,
             language
         )
-        VALUES ('anarchist', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     """
 
     session = requests.Session()
     visited: set[str] = set()
-    batch: list[tuple[str, str, str, str]] = []
+    batch: list[tuple[str, str, str, str, str]] = []
     imported = 0
     page_number = 0
     next_url: str | None = opds_url
@@ -172,9 +180,17 @@ def import_books(conn, opds_url: str) -> int:
                 continue
 
             author = _authors(entry)
-            language = _child_text(entry, "language") or "en"
+            language = _child_text(entry, "language") or default_language
 
-            batch.append((slug, title, author, language))
+            batch.append(
+                (
+                    catalog_code,
+                    slug,
+                    title,
+                    author,
+                    language,
+                )
+            )
             imported += 1
 
             if len(batch) >= BATCH_SIZE:
@@ -183,7 +199,7 @@ def import_books(conn, opds_url: str) -> int:
 
         if page_number % 10 == 0:
             print(
-                f"The Anarchist Library: страниц {page_number}, "
+                f"{catalog_name}: страниц {page_number}, "
                 f"текстов {imported:,}"
             )
 
@@ -193,22 +209,34 @@ def import_books(conn, opds_url: str) -> int:
         conn.executemany(sql, batch)
 
     print(
-        f"The Anarchist Library: {imported:,} текстов, "
+        f"{catalog_name}: {imported:,} текстов, "
         f"страниц OPDS: {page_number}"
     )
     return imported
 
 
-def build_catalog(opds_url: str, catalog_db: Path) -> None:
+def build_catalog(
+    opds_url: str,
+    catalog_db: Path,
+    catalog_code: str = DEFAULT_CATALOG_CODE,
+    catalog_name: str = DEFAULT_CATALOG_NAME,
+    default_language: str = DEFAULT_LANGUAGE,
+) -> None:
     conn, temp_db = open_catalog_rebuild(
         catalog_db=catalog_db,
-        replace_catalog_code=CATALOG_CODE,
+        replace_catalog_code=catalog_code,
     )
 
     try:
-        imported = import_books(conn, opds_url)
+        imported = import_books(
+            conn=conn,
+            opds_url=opds_url,
+            catalog_code=catalog_code,
+            catalog_name=catalog_name,
+            default_language=default_language,
+        )
         if imported == 0:
-            raise ValueError("OPDS The Anarchist Library не содержит EPUB-текстов")
+            raise ValueError(f"OPDS {catalog_name} не содержит EPUB-текстов")
         conn.commit()
         finish_catalog_rebuild(conn, temp_db, catalog_db)
     except Exception:
@@ -218,9 +246,7 @@ def build_catalog(opds_url: str, catalog_db: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Импорт The Anarchist Library в локальный каталог BookFerry"
-        )
+        description="Импорт AmuseWiki-каталога в локальный каталог BookFerry"
     )
     parser.add_argument(
         "--catalog-db",
@@ -230,13 +256,31 @@ def main() -> None:
     parser.add_argument(
         "--url",
         default=DEFAULT_OPDS_URL,
-        help="Первая страница списка текстов OPDS The Anarchist Library",
+        help="Первая страница списка текстов OPDS",
+    )
+    parser.add_argument(
+        "--catalog-code",
+        default=DEFAULT_CATALOG_CODE,
+        help="Код каталога в catalog.db",
+    )
+    parser.add_argument(
+        "--catalog-name",
+        default=DEFAULT_CATALOG_NAME,
+        help="Название каталога для логов",
+    )
+    parser.add_argument(
+        "--language",
+        default=DEFAULT_LANGUAGE,
+        help="Язык по умолчанию, если OPDS его не указал",
     )
     args = parser.parse_args()
 
     build_catalog(
         opds_url=args.url,
         catalog_db=Path(args.catalog_db),
+        catalog_code=args.catalog_code,
+        catalog_name=args.catalog_name,
+        default_language=args.language,
     )
 
 
