@@ -1,0 +1,13 @@
+[Unit]
+Description=BookFerry catalog metadata update
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec bookferry python scripts/update_all_catalogs.py
+TimeoutStartSec=6h
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
