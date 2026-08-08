@@ -31,8 +31,8 @@ from app.models import (
     User,
 )
 from app.services.download import download_book, remove_book
+from app.services.local_search import search_local_catalog
 from app.services.mail import send_file
-from app.services.opds import search_opds
 
 
 router = APIRouter()
@@ -56,11 +56,20 @@ def search(data: SearchRequest):
             detail="Пользователь не найден",
         )
 
+    catalog = get_catalog(user["catalog_id"])
+
+    if catalog is None or not catalog["enabled"]:
+        raise HTTPException(
+            status_code=404,
+            detail="Активный каталог не найден",
+        )
+
     try:
-        books, next_page_url = search_opds(
-            url=user["opds_url"],
+        books, next_page_url = search_local_catalog(
+            catalog_code=catalog["code"],
+            base_url=catalog["base_url"],
             query=data.query,
-            page_url=data.page_url,
+            page_token=data.page_url,
         )
     except ValueError as error:
         raise HTTPException(
