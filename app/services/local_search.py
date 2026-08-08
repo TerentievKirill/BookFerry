@@ -71,7 +71,7 @@ def _anarchist_epub_url(base_url: str, external_id: str) -> str:
     scheme, netloc = _origin(base_url)
 
     if "/" in external_id or not external_id:
-        raise ValueError("Некорректный ID The Anarchist Library")
+        raise ValueError("Некорректный ID AmuseWiki")
 
     return f"{scheme}://{netloc}/library/{external_id}.epub"
 
@@ -87,7 +87,7 @@ def _download_url(
     if catalog_code == "gutenberg":
         return _gutenberg_epub_url(base_url, external_id)
 
-    if catalog_code == "anarchist":
+    if catalog_code in {"anarchist", "anarchist_ru"}:
         return _anarchist_epub_url(base_url, external_id)
 
     raise ValueError(f"Скачивание из каталога {catalog_code} пока не поддерживается")
