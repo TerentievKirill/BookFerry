@@ -14,7 +14,11 @@ def _fields(response: requests.Response) -> list[str]:
 
 def _register(session: requests.Session, base_url: str) -> tuple[str, str]:
     response = session.get(
-        f"{base_url}/pocketbook/register",
+        f"{base_url}/users/register",
+        params={
+            "client_type": "pocketbook",
+            "plain": 1,
+        },
         timeout=30,
     )
     fields = _fields(response)
@@ -25,7 +29,8 @@ def _register(session: requests.Session, base_url: str) -> tuple[str, str]:
 
 def _catalogs(session: requests.Session, base_url: str) -> list[tuple[int, str]]:
     response = session.get(
-        f"{base_url}/pocketbook/catalogs",
+        f"{base_url}/catalogs",
+        params={"plain": 1},
         timeout=30,
     )
     response.raise_for_status()
@@ -45,7 +50,11 @@ def _select_catalog(
     catalog_id: int,
 ) -> str:
     response = session.get(
-        f"{base_url}/pocketbook/{uid}/catalog/{catalog_id}",
+        f"{base_url}/users/{uid}/catalog",
+        params={
+            "catalog_id": catalog_id,
+            "plain": 1,
+        },
         timeout=30,
     )
     fields = _fields(response)
@@ -61,8 +70,12 @@ def _search(
     query: str,
 ) -> list[tuple[str, str, str]]:
     response = session.get(
-        f"{base_url}/pocketbook/{uid}/search",
-        params={"q": query},
+        f"{base_url}/search",
+        params={
+            "uid": uid,
+            "query": query,
+            "plain": 1,
+        },
         timeout=60,
     )
     response.raise_for_status()
@@ -75,7 +88,7 @@ def _search(
                 (
                     unquote(fields[1]),
                     unquote(fields[2]),
-                    fields[3],
+                    unquote(fields[3]),
                 )
             )
     return books
@@ -85,10 +98,14 @@ def _download_first(
     session: requests.Session,
     base_url: str,
     uid: str,
-    token: str,
+    url: str,
 ) -> tuple[int, str | None]:
     response = session.get(
-        f"{base_url}/pocketbook/{uid}/download/{token}",
+        f"{base_url}/download",
+        params={
+            "uid": uid,
+            "url": url,
+        },
         timeout=120,
     )
     response.raise_for_status()
