@@ -104,7 +104,7 @@ NEXT\t<page_url>
 
 Название, автор, URL и следующая страница percent-encoded.
 
-Никаких промежуточных download token нет.
+
 
 ### Скачивание
 

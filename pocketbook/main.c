@@ -43,6 +43,7 @@ char catalog_name[256] = "Не выбрана";
 char custom_opds_url[1024] = "";
 char search_text[256] = "";
 char next_page_url[2048] = "";
+char server_url[512] = DEFAULT_SERVER_URL;
 
 BookEntry entries[MAX_ENTRIES];
 CatalogEntry catalogs[MAX_CATALOGS];
@@ -216,6 +217,7 @@ static void save_settings() {
     fprintf(file, "%s\n", user_uid);
     fprintf(file, "%s\n", catalog_name);
     fprintf(file, "%s\n", custom_opds_url);
+    fprintf(file, "%s\n", server_url)
     fclose(file);
 }
 
@@ -235,6 +237,17 @@ static void load_settings() {
     if (fgets(custom_opds_url, sizeof(custom_opds_url), file)) {
         custom_opds_url[strcspn(custom_opds_url, "\r\n")] = '\0';
     }
+    if (fgets(server_url, sizeof(server_url), file)) {
+    server_url[strcspn(server_url, "\r\n")] = '\0';
+
+    if (!server_url[0]) {
+        safe_copy(
+            server_url,
+            DEFAULT_SERVER_URL,
+            sizeof(server_url)
+        );
+    }
+}
 
     fclose(file);
 }
@@ -931,6 +944,30 @@ static void handle_tap(int px, int py) {
 
     if (time(NULL) - last_tap_time < 1) return;
     last_tap_time = time(NULL);
+    {
+    char debug[256];
+
+    int first_y = main_rect.y + spacing;
+    int second_y = first_y + input_h + spacing;
+
+    snprintf(
+        debug,
+        sizeof(debug),
+        "tap y=%d\nlib: %d-%d\nsearch: %d-%d",
+        py,
+        first_y,
+        first_y + input_h,
+        second_y,
+        second_y + input_h
+    );
+
+    Message(
+        ICON_INFORMATION,
+        "DEBUG TAP",
+        debug,
+        3000
+    );
+}
 
     if (app_mode == MODE_HOME) {
         int y = main_rect.y + spacing;
