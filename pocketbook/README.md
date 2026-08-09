@@ -1,135 +1,166 @@
 # BookFerry для PocketBook
 
-PocketBook-клиент использует BookFerry Server как единый источник поиска и скачивания EPUB.
+PocketBook использует тот же BookFerry API, что и другие клиенты.
 
-Ридер больше не знает структуру Flibusta, Gutenberg или AmuseWiki и не разбирает OPDS встроенных каталогов напрямую.
+Отдельного `/pocketbook/...` API больше нет.
 
-## Что делает клиент
+## Как это работает
 
-1. При первом запуске получает UUID устройства у BookFerry Server.
-2. Сохраняет UUID локально в:
+При первом запуске PocketBook регистрируется как обычный пользователь BookFerry:
+
+```text
+GET /users/register?client_type=pocketbook&plain=1
+```
+
+Сервер создаёт пользователя с `client_type=pocketbook` и возвращает `uid`.
+
+`uid` сохраняется локально:
 
 ```text
 /mnt/ext1/system/config/BookFerry/config.cfg
 ```
 
-3. Получает список доступных библиотек с сервера.
-4. Позволяет выбрать встроенную библиотеку или указать собственный OPDS.
-5. Отправляет серверу поисковый запрос по названию или автору.
-6. Показывает результаты по 5 книг на экране.
-7. По нажатию скачивает EPUB через BookFerry Server.
-8. Сохраняет файл в:
+Дальше этот же `uid` используется для профиля, поиска и скачивания.
+
+В БД также хранится `last_seen_at`, поэтому можно видеть, когда конкретный клиент последний раз обращался к серверу.
+
+## Общие ручки
+
+### Каталоги
+
+Telegram получает JSON:
+
+```text
+GET /catalogs
+```
+
+PocketBook использует ту же ручку в простом текстовом формате:
+
+```text
+GET /catalogs?plain=1
+```
+
+### Профиль
+
+```text
+GET /users/{uid}
+GET /users/{uid}?plain=1
+```
+
+### Выбор каталога
+
+Обычный API:
+
+```text
+PATCH /users/{uid}/catalog
+```
+
+PocketBook GET-вариант для `QuickDownload()`:
+
+```text
+GET /users/{uid}/catalog?catalog_id=3&plain=1
+```
+
+### Пользовательский OPDS
+
+```text
+PATCH /users/{uid}/opds
+```
+
+PocketBook:
+
+```text
+GET /users/{uid}/opds?opds_url=<url>&plain=1
+```
+
+### Поиск
+
+Одна ручка для Telegram и PocketBook:
+
+```text
+GET /search
+```
+
+Telegram:
+
+```text
+GET /search?telegram_id=123&query=лукьяненко
+```
+
+PocketBook:
+
+```text
+GET /search?uid=<uid>&query=лукьяненко&plain=1
+```
+
+Ответ PocketBook:
+
+```text
+COUNT\t20
+BOOK\t<title>\t<author>\t<url>
+BOOK\t<title>\t<author>\t<url>
+NEXT\t<page_url>
+```
+
+Название, автор, URL и следующая страница percent-encoded.
+
+Никаких промежуточных download token нет.
+
+### Скачивание
+
+Одна ручка:
+
+```text
+GET /download
+```
+
+Telegram:
+
+```text
+GET /download?telegram_id=123&url=<book_url>
+```
+
+PocketBook:
+
+```text
+GET /download?uid=<uid>&url=<book_url>
+```
+
+Сервер всегда возвращает EPUB клиенту.
+
+Если у пользователя настроены email, сервер дополнительно отправляет EPUB на них. У PocketBook-пользователя email не обязателен.
+
+URL книги всё равно проходит через `safe_http`, поэтому отдельные подписанные токены не нужны.
+
+## PocketBook client
+
+Исходник:
+
+```text
+pocketbook/main.c
+```
+
+Клиент хранит:
+
+```text
+uid
+имя текущей библиотеки
+custom OPDS URL, если используется
+```
+
+Ридер больше не знает структуру Flibusta, Gutenberg или AmuseWiki.
+
+Поиск и скачивание идут через BookFerry Server.
+
+EPUB сохраняется в:
 
 ```text
 /mnt/ext1/Books
 ```
 
-9. Сканирование библиотеки PocketBook запускается вручную кнопкой `Обн. библиотеку`.
-
-## Сервер
-
-По умолчанию клиент использует:
-
-```text
-https://api.heartlab.app
-```
-
-Адрес задаётся константой `SERVER_URL` в `main.c`.
-
-## PocketBook API
-
-API специально сделан простым и GET-only, потому что клиент использует штатный InkView `QuickDownload()` и не требует JSON-библиотеки.
-
-### Регистрация
-
-```http
-GET /pocketbook/register
-```
-
-Ответ:
-
-```text
-UID\t<uid>\t<catalog_id>\t<percent_encoded_catalog_name>
-```
-
-### Профиль
-
-```http
-GET /pocketbook/{uid}/profile
-```
-
-### Список библиотек
-
-```http
-GET /pocketbook/catalogs
-```
-
-Пример:
-
-```text
-CATALOG\t1\tProject%20Gutenberg
-CATALOG\t3\tFlibusta
-CUSTOM\t%D0%94%D1%80%D1%83%D0%B3%D0%BE%D0%B9%20OPDS
-```
-
-### Выбор встроенной библиотеки
-
-```http
-GET /pocketbook/{uid}/catalog/{catalog_id}
-```
-
-### Свой OPDS
-
-```http
-GET /pocketbook/{uid}/opds?url=<percent_encoded_url>
-```
-
-URL проверяется сервером тем же SSRF-safe механизмом, что используется остальными клиентами BookFerry.
-
-### Поиск
-
-```http
-GET /pocketbook/{uid}/search?q=<query>
-```
-
-Следующая страница:
-
-```http
-GET /pocketbook/{uid}/search?q=<query>&page=<opaque_token>
-```
-
-Ответ:
-
-```text
-COUNT\t20
-BOOK\t<title>\t<author>\t<download_token>
-BOOK\t<title>\t<author>\t<download_token>
-NEXT\t<page_token>
-```
-
-`title` и `author` percent-encoded. Токены opaque: клиент не должен разбирать их содержимое.
-
-Токены подписываются сервером и не являются просто закодированными внешними URL.
-
-По умолчанию ключ подписи генерируется при старте процесса. Это нормально для одного production-процесса: после перезапуска старые результаты поиска нужно просто получить заново.
-
-Для стабильных токенов между рестартами или при нескольких worker можно задать:
-
-```env
-POCKETBOOK_TOKEN_SECRET=long-random-secret
-```
-
-### Скачать EPUB
-
-```http
-GET /pocketbook/{uid}/download/{download_token}
-```
-
-Сервер скачивает EPUB у исходной библиотеки и возвращает файл PocketBook-клиенту. Email для PocketBook-клиента не требуется.
+Сканирование библиотеки запускается вручную кнопкой `Обн. библиотеку`.
 
 ## Smoke test
-
-После deploy серверную часть можно проверить без PocketBook:
 
 ```bash
 python scripts/smoke_pocketbook.py \
@@ -137,34 +168,8 @@ python scripts/smoke_pocketbook.py \
   --query "лабиринт отражений"
 ```
 
-Smoke test проходит цепочку:
-
-```text
-register → catalogs → Flibusta → search → download → ZIP signature
-```
-
 Успешный финал:
 
 ```text
 POCKETBOOK SMOKE: PASSED
 ```
-
-## Исходник
-
-```text
-pocketbook/main.c
-```
-
-Код рассчитан на InkView SDK и использует уже знакомые функции PocketBook:
-
-```text
-InkViewMain
-QuickDownload
-OpenKeyboard
-Message
-DrawString
-DrawRect
-FullUpdate
-```
-
-Команда сборки зависит от установленной версии PocketBook SDK/toolchain и в репозитории намеренно не зафиксирована.
