@@ -109,6 +109,16 @@ NEXT\t<page_token>
 
 `title` и `author` percent-encoded. Токены opaque: клиент не должен разбирать их содержимое.
 
+Токены подписываются сервером и не являются просто закодированными внешними URL.
+
+По умолчанию ключ подписи генерируется при старте процесса. Это нормально для одного production-процесса: после перезапуска старые результаты поиска нужно просто получить заново.
+
+Для стабильных токенов между рестартами или при нескольких worker можно задать:
+
+```env
+POCKETBOOK_TOKEN_SECRET=long-random-secret
+```
+
 ### Скачать EPUB
 
 ```http
@@ -116,6 +126,28 @@ GET /pocketbook/{uid}/download/{download_token}
 ```
 
 Сервер скачивает EPUB у исходной библиотеки и возвращает файл PocketBook-клиенту. Email для PocketBook-клиента не требуется.
+
+## Smoke test
+
+После deploy серверную часть можно проверить без PocketBook:
+
+```bash
+python scripts/smoke_pocketbook.py \
+  --base-url https://api.heartlab.app \
+  --query "лабиринт отражений"
+```
+
+Smoke test проходит цепочку:
+
+```text
+register → catalogs → Flibusta → search → download → ZIP signature
+```
+
+Успешный финал:
+
+```text
+POCKETBOOK SMOKE: PASSED
+```
 
 ## Исходник
 
