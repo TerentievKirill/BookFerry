@@ -32,8 +32,14 @@ def register_user(client_type: str, external_id: str | None = None):
         uid = str(uuid.uuid4())
         cursor.execute(
             """
-            INSERT INTO users (uid, client_type, external_id, catalog_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO users (
+                uid,
+                client_type,
+                external_id,
+                catalog_id,
+                last_seen_at
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (uid, client_type, external_id, _default_catalog_id(cursor)),
         )
@@ -56,6 +62,7 @@ def _select_user(where: str, value, connection=None):
                users.custom_opds_url,
                users.custom_opds_search_template,
                users.emails, users.subject, users.created_at,
+               users.last_seen_at,
                COALESCE(users.custom_opds_url, catalogs.base_url) AS opds_url
         FROM users
         JOIN catalogs ON catalogs.id = users.catalog_id
@@ -76,6 +83,15 @@ def get_user(telegram_id: int):
 
 def get_user_by_uid(uid: str, connection=None):
     return _select_user("users.uid = ?", uid, connection)
+
+
+def touch_user(uid: str) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE uid = ?",
+            (uid,),
+        )
+        return cursor.rowcount > 0
 
 
 def _update_user(field: str, value, where: str, identity):
@@ -116,7 +132,8 @@ def _update_catalog(where: str, identity, catalog_id: int) -> bool:
             UPDATE users
             SET catalog_id = ?,
                 custom_opds_url = NULL,
-                custom_opds_search_template = NULL
+                custom_opds_search_template = NULL,
+                last_seen_at = CURRENT_TIMESTAMP
             WHERE {where}
             """,
             (catalog_id, identity),
@@ -147,7 +164,8 @@ def _update_custom_opds(
             f"""
             UPDATE users
             SET custom_opds_url = ?,
-                custom_opds_search_template = ?
+                custom_opds_search_template = ?,
+                last_seen_at = CURRENT_TIMESTAMP
             WHERE {where}
             """,
             (opds_url, search_template, identity),
