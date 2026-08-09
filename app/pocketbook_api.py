@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import logging
 import os
+import secrets
 from urllib.parse import quote
 
 import requests
@@ -28,6 +31,11 @@ logger = logging.getLogger("bookferry.pocketbook")
 
 MAX_TOKEN_LENGTH = 4096
 MAX_QUERY_LENGTH = 256
+TOKEN_SIGNATURE_LENGTH = 16
+_TOKEN_SECRET = (
+    os.environ.get("POCKETBOOK_TOKEN_SECRET", "").encode("utf-8")
+    or secrets.token_bytes(32)
+)
 
 
 def _plain(text: str) -> PlainTextResponse:
@@ -42,8 +50,15 @@ def _encode_text(value: str | None) -> str:
 
 
 def _encode_token(value: str) -> str:
+    payload = value.encode("utf-8")
+    signature = hmac.new(
+        _TOKEN_SECRET,
+        payload,
+        hashlib.sha256,
+    ).digest()[:TOKEN_SIGNATURE_LENGTH]
+
     return base64.urlsafe_b64encode(
-        value.encode("utf-8")
+        signature + payload
     ).decode("ascii").rstrip("=")
 
 
@@ -55,11 +70,38 @@ def _decode_token(token: str) -> str:
         )
 
     padding = "=" * (-len(token) % 4)
+
     try:
-        value = base64.urlsafe_b64decode(
-            token + padding
-        ).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as error:
+        raw = base64.urlsafe_b64decode(token + padding)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Некорректный token",
+        ) from error
+
+    if len(raw) <= TOKEN_SIGNATURE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail="Некорректный token",
+        )
+
+    signature = raw[:TOKEN_SIGNATURE_LENGTH]
+    payload = raw[TOKEN_SIGNATURE_LENGTH:]
+    expected = hmac.new(
+        _TOKEN_SECRET,
+        payload,
+        hashlib.sha256,
+    ).digest()[:TOKEN_SIGNATURE_LENGTH]
+
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(
+            status_code=400,
+            detail="Некорректный token",
+        )
+
+    try:
+        value = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
         raise HTTPException(
             status_code=400,
             detail="Некорректный token",
