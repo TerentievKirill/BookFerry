@@ -11,12 +11,16 @@
 #define CONFIG_DIR  "/mnt/ext1/system/config/BookFerry"
 #define CONFIG_FILE "/mnt/ext1/system/config/BookFerry/config.cfg"
 
+#define BOOKS_DIR "/mnt/ext1/Books"
+
 #define MAX_ENTRIES 160
 #define MAX_CATALOGS 20
 #define ITEMS_PER_PAGE 5
 #define URL_LEN 4096
 #define TOKEN_LEN 4096
 #define UID_LEN 64
+#define MAX_TEXT_RESPONSE (1024 * 1024)
+#define MAX_FILENAME_BASE 220
 
 #define MODE_HOME 0
 #define MODE_RESULTS 1
@@ -50,6 +54,7 @@ int current_page = 0;
 int catalogs_count = 0;
 int catalog_page = 0;
 time_t last_tap_time = 0;
+bool first_show = true;
 
 BookEntry entries[MAX_ENTRIES];
 CatalogEntry catalogs[MAX_CATALOGS];
@@ -70,6 +75,7 @@ int main_handler(int type, int par1, int par2);
 static void safe_copy(char *dst, const char *src, int dst_len) {
     if (!dst || dst_len <= 0) return;
     if (!src) src = "";
+
     strncpy(dst, src, dst_len - 1);
     dst[dst_len - 1] = '\0';
 }
@@ -93,6 +99,7 @@ static void percent_decode(const char *src, char *dst, int dst_len) {
         if (src[i] == '%' && src[i + 1] && src[i + 2]) {
             int hi = hex_value(src[i + 1]);
             int lo = hex_value(src[i + 2]);
+
             if (hi >= 0 && lo >= 0) {
                 dst[j++] = (char)((hi << 4) | lo);
                 i += 3;
@@ -133,6 +140,7 @@ static void url_encode_component(const char *src, char *dst, int dst_len) {
             dst[j++] = hex[(c >> 4) & 0x0F];
             dst[j++] = hex[c & 0x0F];
         }
+
         i++;
     }
 
@@ -164,7 +172,7 @@ static char *http_get_text(const char *url, int timeout_seconds) {
     void *raw = QuickDownload(url, &size, timeout_seconds);
     char *text;
 
-    if (!raw || size <= 0) {
+    if (!raw || size <= 0 || size > MAX_TEXT_RESPONSE) {
         if (raw) free(raw);
         return NULL;
     }
@@ -188,10 +196,106 @@ static void sanitize_filename(char *filename) {
 
     for (i = 0; filename[i]; i++) {
         unsigned char c = (unsigned char)filename[i];
+
         if (strchr("/\\:*?\"|<>", c) || c < 32) {
             filename[i] = '_';
         }
     }
+}
+
+static void truncate_utf8(char *text, int max_bytes) {
+    int len;
+
+    if (!text || max_bytes <= 0) return;
+
+    len = (int)strlen(text);
+    if (len <= max_bytes) return;
+
+    len = max_bytes;
+    while (
+        len > 0 &&
+        (((unsigned char)text[len] & 0xC0) == 0x80)
+    ) {
+        len--;
+    }
+
+    text[len] = '\0';
+}
+
+static void build_book_filename(
+    const BookEntry *entry,
+    char *filename,
+    int filename_len
+) {
+    char base[512];
+    const char *author;
+    const char *title;
+
+    if (!filename || filename_len <= 0) return;
+
+    author = (entry && entry->author[0])
+        ? entry->author
+        : "Неизвестный автор";
+    title = (entry && entry->title[0])
+        ? entry->title
+        : "Книга";
+
+    snprintf(base, sizeof(base), "%s - %s", author, title);
+    sanitize_filename(base);
+    truncate_utf8(base, MAX_FILENAME_BASE);
+
+    snprintf(filename, filename_len, "%s.epub", base);
+}
+
+static bool looks_like_epub(const void *data, int size) {
+    const unsigned char *bytes = (const unsigned char *)data;
+
+    return data != NULL &&
+           size >= 4 &&
+           bytes[0] == 'P' &&
+           bytes[1] == 'K';
+}
+
+static void fit_text(const char *src, char *dst, int dst_len, int max_width) {
+    int len;
+
+    if (!dst || dst_len <= 0) return;
+
+    safe_copy(dst, src, dst_len);
+    if (StringWidth(dst) <= max_width) return;
+
+    len = (int)strlen(dst);
+
+    while (len > 0) {
+        do {
+            len--;
+        } while (
+            len > 0 &&
+            (((unsigned char)dst[len] & 0xC0) == 0x80)
+        );
+
+        dst[len] = '\0';
+
+        if (len + 3 < dst_len) {
+            strcat(dst, "...");
+            if (StringWidth(dst) <= max_width) return;
+            dst[len] = '\0';
+        }
+    }
+
+    dst[0] = '\0';
+}
+
+static void draw_fit_string(
+    int x,
+    int y,
+    int max_width,
+    const char *text
+) {
+    char buffer[512];
+
+    fit_text(text, buffer, sizeof(buffer), max_width);
+    DrawString(x, y, buffer);
 }
 
 void clear_entries() {
@@ -233,6 +337,10 @@ void load_settings() {
     }
 
     fclose(file);
+
+    if (!catalog_name[0]) {
+        safe_copy(catalog_name, "Не выбрана", sizeof(catalog_name));
+    }
 }
 
 void show_progress_bar(const char *message) {
@@ -260,7 +368,6 @@ static bool register_device() {
     char *text;
     char *fields[5];
     int count;
-    char encoded_name[768];
 
     snprintf(
         url,
@@ -283,8 +390,7 @@ static bool register_device() {
     }
 
     safe_copy(device_uid, fields[1], sizeof(device_uid));
-    safe_copy(encoded_name, fields[3], sizeof(encoded_name));
-    percent_decode(encoded_name, catalog_name, sizeof(catalog_name));
+    percent_decode(fields[3], catalog_name, sizeof(catalog_name));
     custom_opds_url[0] = '\0';
     save_settings();
 
@@ -297,7 +403,6 @@ static bool load_profile() {
     char *text;
     char *fields[6];
     int count;
-    char mode[32];
 
     if (!device_uid[0]) return false;
 
@@ -321,9 +426,8 @@ static bool load_profile() {
     }
 
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-    safe_copy(mode, fields[3], sizeof(mode));
 
-    if (strcmp(mode, "custom") == 0) {
+    if (strcmp(fields[3], "custom") == 0) {
         percent_decode(
             fields[4],
             custom_opds_url,
@@ -339,16 +443,16 @@ static bool load_profile() {
 }
 
 static bool ensure_device() {
-    if (!device_uid[0]) {
-        if (!register_device()) {
-            Message(
-                ICON_ERROR,
-                "BookFerry",
-                "Не удалось зарегистрировать устройство",
-                3000
-            );
-            return false;
-        }
+    if (device_uid[0]) return true;
+
+    if (!register_device()) {
+        Message(
+            ICON_ERROR,
+            "BookFerry",
+            "Не удалось зарегистрировать устройство",
+            3000
+        );
+        return false;
     }
 
     return true;
@@ -370,6 +474,7 @@ static bool load_catalogs() {
     memset(catalogs, 0, sizeof(catalogs));
 
     line = text;
+
     while (line && *line && catalogs_count < MAX_CATALOGS) {
         char *eol = strchr(line, '\n');
         char *fields[4];
@@ -381,6 +486,7 @@ static bool load_catalogs() {
 
         if (count >= 3 && strcmp(fields[0], "CATALOG") == 0) {
             CatalogEntry *catalog = &catalogs[catalogs_count++];
+
             catalog->id = atoi(fields[1]);
             catalog->custom = false;
             percent_decode(
@@ -388,8 +494,12 @@ static bool load_catalogs() {
                 catalog->name,
                 sizeof(catalog->name)
             );
-        } else if (count >= 2 && strcmp(fields[0], "CUSTOM") == 0) {
+        } else if (
+            count >= 2 &&
+            strcmp(fields[0], "CUSTOM") == 0
+        ) {
             CatalogEntry *catalog = &catalogs[catalogs_count++];
+
             catalog->id = 0;
             catalog->custom = true;
             percent_decode(
@@ -450,6 +560,7 @@ static bool set_custom_opds(const char *opds_url) {
     char *text;
     char *fields[4];
     int count;
+    int catalog_id;
 
     if (!opds_url || !opds_url[0] || !device_uid[0]) return false;
 
@@ -476,18 +587,24 @@ static bool set_custom_opds(const char *opds_url) {
         return false;
     }
 
+    catalog_id = atoi(fields[1]);
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-    safe_copy(custom_opds_url, opds_url, sizeof(custom_opds_url));
+
+    if (catalog_id > 0) {
+        custom_opds_url[0] = '\0';
+    } else {
+        safe_copy(custom_opds_url, opds_url, sizeof(custom_opds_url));
+    }
+
     save_settings();
     clear_entries();
-
     free(text);
     return true;
 }
 
 static bool parse_search_response(char *text) {
     char *line = text;
-    bool found_any = false;
+    bool valid_response = false;
 
     next_page_token[0] = '\0';
 
@@ -500,14 +617,16 @@ static bool parse_search_response(char *text) {
         line[strcspn(line, "\r")] = '\0';
         count = split_fields(line, fields, 5);
 
-        if (
+        if (count >= 2 && strcmp(fields[0], "COUNT") == 0) {
+            valid_response = true;
+        } else if (
             count >= 4 &&
             strcmp(fields[0], "BOOK") == 0 &&
             entries_count < MAX_ENTRIES
         ) {
             BookEntry *entry = &entries[entries_count];
-            memset(entry, 0, sizeof(BookEntry));
 
+            memset(entry, 0, sizeof(BookEntry));
             percent_decode(
                 fields[1],
                 entry->title,
@@ -529,9 +648,11 @@ static bool parse_search_response(char *text) {
                     );
                 }
                 entries_count++;
-                found_any = true;
             }
-        } else if (count >= 2 && strcmp(fields[0], "NEXT") == 0) {
+        } else if (
+            count >= 2 &&
+            strcmp(fields[0], "NEXT") == 0
+        ) {
             safe_copy(
                 next_page_token,
                 fields[1],
@@ -542,7 +663,7 @@ static bool parse_search_response(char *text) {
         line = eol ? eol + 1 : NULL;
     }
 
-    return found_any;
+    return valid_response;
 }
 
 static bool load_search_page(const char *url, const char *message) {
@@ -564,6 +685,7 @@ void do_search() {
     char encoded_query[1024];
 
     if (!search_text[0]) return;
+
     if (!ensure_device()) {
         draw_screen();
         return;
@@ -589,8 +711,19 @@ void do_search() {
         Message(
             ICON_ERROR,
             "BookFerry",
-            "Ничего не найдено или сервер недоступен",
+            "Сервер недоступен или ответ некорректен",
             3000
+        );
+        draw_screen();
+        return;
+    }
+
+    if (entries_count == 0) {
+        Message(
+            ICON_INFORMATION,
+            "BookFerry",
+            "Ничего не найдено",
+            2500
         );
         draw_screen();
         return;
@@ -604,10 +737,11 @@ void do_search() {
 void download_selected_book(BookEntry *entry) {
     char url[URL_LEN + TOKEN_LEN];
     char filepath[768];
-    char filename[512];
+    char filename[256];
     int size = 0;
     void *data;
     FILE *file;
+    size_t written;
 
     if (!entry || !entry->token[0] || !device_uid[0]) return;
 
@@ -623,33 +757,25 @@ void download_selected_book(BookEntry *entry) {
     show_progress_bar("Скачивание EPUB...");
     data = QuickDownload(url, &size, 120);
 
-    if (!data || size <= 0) {
+    if (!looks_like_epub(data, size)) {
         if (data) free(data);
         Message(
             ICON_ERROR,
             "BookFerry",
-            "Не удалось скачать книгу",
+            "Сервер не вернул корректный EPUB",
             3000
         );
         draw_screen();
         return;
     }
 
-    system("mkdir -p /mnt/ext1/Books");
-
-    snprintf(
-        filename,
-        sizeof(filename),
-        "%s - %s.epub",
-        entry->author,
-        entry->title
-    );
-    sanitize_filename(filename);
+    system("mkdir -p " BOOKS_DIR);
+    build_book_filename(entry, filename, sizeof(filename));
 
     snprintf(
         filepath,
         sizeof(filepath),
-        "/mnt/ext1/Books/%s",
+        BOOKS_DIR "/%s",
         filename
     );
 
@@ -666,9 +792,21 @@ void download_selected_book(BookEntry *entry) {
         return;
     }
 
-    fwrite(data, 1, size, file);
+    written = fwrite(data, 1, size, file);
     fclose(file);
     free(data);
+
+    if (written != (size_t)size) {
+        remove(filepath);
+        Message(
+            ICON_ERROR,
+            "BookFerry",
+            "Ошибка записи файла",
+            3000
+        );
+        draw_screen();
+        return;
+    }
 
     Message(
         ICON_INFORMATION,
@@ -756,9 +894,10 @@ void draw_screen() {
             y_cursor + (input_h / 4) - (font->height / 2),
             "Библиотека:"
         );
-        DrawString(
+        draw_fit_string(
             x_start + 20,
             y_cursor + (input_h * 3 / 4) - (font->height / 2),
+            w_content - 40,
             catalog_name
         );
         y_cursor += input_h + spacing;
@@ -769,9 +908,10 @@ void draw_screen() {
             y_cursor + (input_h / 4) - (font->height / 2),
             "Название или автор:"
         );
-        DrawString(
+        draw_fit_string(
             x_start + 20,
             y_cursor + (input_h * 3 / 4) - (font->height / 2),
+            w_content - 40,
             search_text
         );
         y_cursor += input_h + spacing;
@@ -812,14 +952,16 @@ void draw_screen() {
         if (end_res > entries_count) end_res = entries_count;
 
         for (i = start_res; i < end_res; i++) {
-            DrawString(
+            draw_fit_string(
                 x_start + 10,
                 y_cursor + (item_h / 4) - (font->height / 2),
+                w_content - 20,
                 entries[i].title
             );
-            DrawString(
+            draw_fit_string(
                 x_start + 10,
                 y_cursor + (item_h * 3 / 4) - (font->height / 2),
+                w_content - 20,
                 entries[i].author
             );
             DrawLine(
@@ -871,28 +1013,21 @@ void draw_screen() {
             "Домой"
         );
     } else if (app_mode == MODE_CATALOGS) {
-        int list_top;
-        int list_zone_h;
-        int item_h;
-        int start_item;
-        int end_item;
+        int list_zone_h = main_rect.h * 60 / 100;
+        int item_h = list_zone_h / ITEMS_PER_PAGE;
+        int start_item = catalog_page * ITEMS_PER_PAGE;
+        int end_item = start_item + ITEMS_PER_PAGE;
         int total_pages;
         int i;
         char page_status[96];
 
-        DrawString(x_start, y_cursor, "Выберите библиотеку:");
-        y_cursor += font->height + spacing;
-        list_top = y_cursor;
-        list_zone_h = main_rect.h * 52 / 100;
-        item_h = list_zone_h / ITEMS_PER_PAGE;
-        start_item = catalog_page * ITEMS_PER_PAGE;
-        end_item = start_item + ITEMS_PER_PAGE;
         if (end_item > catalogs_count) end_item = catalogs_count;
 
         for (i = start_item; i < end_item; i++) {
-            DrawString(
+            draw_fit_string(
                 x_start + 10,
                 y_cursor + (item_h - font->height) / 2,
+                w_content - 20,
                 catalogs[i].name
             );
             DrawLine(
@@ -919,7 +1054,8 @@ void draw_screen() {
 
         DrawString(
             x_start,
-            list_top + list_zone_h + spacing,
+            (main_rect.y + main_rect.h) -
+                button_h - font->height - 25,
             page_status
         );
 
@@ -933,13 +1069,11 @@ void draw_screen() {
     } else if (app_mode == MODE_ABOUT) {
         int btn_y;
 
-        DrawString(x_start, y_cursor, "О программе:");
-        y_cursor += font->height * 2;
         DrawString(x_start, y_cursor, "BookFerry для PocketBook");
-        y_cursor += font->height + 10;
+        y_cursor += font->height * 2;
         DrawString(x_start, y_cursor, "Версия: 2.0");
         y_cursor += font->height + 10;
-        DrawString(x_start, y_cursor, "Поиск через сервер BookFerry");
+        DrawString(x_start, y_cursor, "Поиск и EPUB через BookFerry Server");
         y_cursor += font->height + 10;
         DrawString(x_start, y_cursor, "Кирилл Т");
         y_cursor += font->height + 10;
@@ -974,7 +1108,7 @@ void keyboard_opds_handler(char *text) {
         Message(
             ICON_INFORMATION,
             "BookFerry",
-            "OPDS подключён",
+            "Библиотека изменена",
             2000
         );
         app_mode = MODE_HOME;
@@ -988,6 +1122,18 @@ void keyboard_opds_handler(char *text) {
     }
 
     draw_screen();
+}
+
+static bool tap_inside(
+    int x,
+    int y,
+    int left,
+    int top,
+    int width,
+    int height
+) {
+    return x >= left && x <= left + width &&
+           y >= top && y <= top + height;
 }
 
 void handle_tap(int x, int y) {
@@ -1014,10 +1160,9 @@ void handle_tap(int x, int y) {
             (main_rect.y + main_rect.h) - button_h - spacing;
         int refresh_y = about_y - button_h - spacing;
 
-        if (
-            x >= x_start && x <= x_start + w_content &&
-            y >= y_cursor && y <= y_cursor + input_h
-        ) {
+        if (tap_inside(
+            x, y, x_start, y_cursor, w_content, input_h
+        )) {
             if (!ensure_device()) {
                 draw_screen();
                 return;
@@ -1040,10 +1185,9 @@ void handle_tap(int x, int y) {
 
         y_cursor += input_h + spacing;
 
-        if (
-            x >= x_start && x <= x_start + w_content &&
-            y >= y_cursor && y <= y_cursor + input_h
-        ) {
+        if (tap_inside(
+            x, y, x_start, y_cursor, w_content, input_h
+        )) {
             OpenKeyboard(
                 "Поиск",
                 search_text,
@@ -1057,18 +1201,18 @@ void handle_tap(int x, int y) {
         y_cursor += input_h + spacing;
 
         if (
-            x >= x_start && x <= x_start + w_content &&
-            y >= y_cursor && y <= y_cursor + button_h &&
-            search_text[0]
+            search_text[0] &&
+            tap_inside(
+                x, y, x_start, y_cursor, w_content, button_h
+            )
         ) {
             do_search();
             return;
         }
 
-        if (
-            x >= x_start && x <= x_start + w_content &&
-            y >= refresh_y && y <= refresh_y + button_h
-        ) {
+        if (tap_inside(
+            x, y, x_start, refresh_y, w_content, button_h
+        )) {
             refresh_library();
             Message(
                 ICON_INFORMATION,
@@ -1080,10 +1224,9 @@ void handle_tap(int x, int y) {
             return;
         }
 
-        if (
-            x >= x_start && x <= x_start + w_content &&
-            y >= about_y && y <= about_y + button_h
-        ) {
+        if (tap_inside(
+            x, y, x_start, about_y, w_content, button_h
+        )) {
             app_mode = MODE_ABOUT;
             draw_screen();
             return;
@@ -1096,8 +1239,9 @@ void handle_tap(int x, int y) {
 
         if (y >= btn_y && y <= btn_y + button_h) {
             if (x >= x_start && x <= x_start + btn_w) {
-                if (current_page > 0) current_page--;
-                else {
+                if (current_page > 0) {
+                    current_page--;
+                } else {
                     app_mode = MODE_HOME;
                     clear_entries();
                 }
@@ -1141,17 +1285,25 @@ void handle_tap(int x, int y) {
                         next_page_token
                     );
 
-                    if (
-                        load_search_page(url, "Следующая страница...") &&
-                        entries_count > old_count
-                    ) {
-                        current_page++;
-                    } else {
+                    if (!load_search_page(
+                        url,
+                        "Следующая страница..."
+                    )) {
                         Message(
                             ICON_ERROR,
                             "BookFerry",
                             "Следующая страница не загрузилась",
                             3000
+                        );
+                    } else if (entries_count > old_count) {
+                        current_page++;
+                    } else {
+                        next_page_token[0] = '\0';
+                        Message(
+                            ICON_INFORMATION,
+                            "BookFerry",
+                            "Больше результатов нет",
+                            2000
                         );
                     }
                 }
@@ -1175,9 +1327,8 @@ void handle_tap(int x, int y) {
     } else if (app_mode == MODE_CATALOGS) {
         int btn_y = (main_rect.y + main_rect.h) - button_h;
         int btn_w = (w_content - (spacing * 2)) / 3;
-        int list_top =
-            main_rect.y + spacing + font->height + spacing;
-        int list_zone_h = main_rect.h * 52 / 100;
+        int list_top = main_rect.y + spacing;
+        int list_zone_h = main_rect.h * 60 / 100;
 
         if (y >= btn_y && y <= btn_y + button_h) {
             if (x >= x_start && x <= x_start + btn_w) {
@@ -1194,7 +1345,10 @@ void handle_tap(int x, int y) {
                 int total_pages =
                     (catalogs_count + ITEMS_PER_PAGE - 1) /
                     ITEMS_PER_PAGE;
-                if (catalog_page < total_pages - 1) catalog_page++;
+
+                if (catalog_page < total_pages - 1) {
+                    catalog_page++;
+                }
             }
 
             draw_screen();
@@ -1257,6 +1411,7 @@ int main_handler(int type, int par1, int par2) {
             font = OpenFont("DejaVu Sans", font_size, false);
             load_settings();
 
+            main_rect.x = 0;
             main_rect.y = screen_h * 7 / 100;
             main_rect.w = screen_w;
             main_rect.h =
@@ -1265,8 +1420,11 @@ int main_handler(int type, int par1, int par2) {
         }
 
         case EVT_SHOW:
-            if (ensure_device()) {
-                load_profile();
+            if (first_show) {
+                first_show = false;
+                if (ensure_device()) {
+                    load_profile();
+                }
             }
             draw_screen();
             break;
