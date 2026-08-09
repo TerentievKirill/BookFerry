@@ -7,6 +7,7 @@ from app.logging_config import (
     configure_logging,
     request_logging_middleware,
 )
+from app.pocketbook_api import router as pocketbook_router
 
 
 configure_logging()
@@ -17,3 +18,4 @@ init_catalog_db()
 app = FastAPI(title="BookFerry")
 app.middleware("http")(request_logging_middleware)
 app.include_router(router)
+app.include_router(pocketbook_router)
