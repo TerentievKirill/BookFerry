@@ -47,6 +47,7 @@ class User(BaseModel):
     emails: str | None = None
     subject: str | None = None
     created_at: str
+    last_seen_at: str | None = None
 
 
 class TelegramUser(BaseModel):

@@ -67,10 +67,19 @@ def _create_users(cursor):
             emails TEXT,
             subject TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TEXT,
             FOREIGN KEY (catalog_id) REFERENCES catalogs(id)
         )
         """
     )
+
+    columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "last_seen_at" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
+
     cursor.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS users_client_external_id_unique
