@@ -1,40 +1,41 @@
-# BookFerry для PocketBook
+# BookFerry for PocketBook
 
-PocketBook использует тот же BookFerry API, что и другие клиенты.
+PocketBook использует общий BookFerry API. Отдельного `/pocketbook/...` backend нет.
 
-Отдельного `/pocketbook/...` API больше нет.
+Клиент написан на C с использованием PocketBook InkView SDK и находится в `pocketbook/main.c`.
 
-## Как это работает
+## Как работает клиент
 
-При первом запуске PocketBook регистрируется как обычный пользователь BookFerry:
+При первом запуске PocketBook регистрируется:
 
 ```text
 GET /users/register?client_type=pocketbook&plain=1
 ```
 
-Сервер создаёт пользователя с `client_type=pocketbook` и возвращает `uid`.
+Backend создаёт пользователя и возвращает UUID `uid`. Он сохраняется локально и затем используется для профиля, поиска и скачивания.
 
-`uid` сохраняется локально:
+Конфигурация хранится в:
 
 ```text
 /mnt/ext1/system/config/BookFerry/config.cfg
 ```
 
-Дальше этот же `uid` используется для профиля, поиска и скачивания.
-
-В БД также хранится `last_seen_at`, поэтому можно видеть, когда конкретный клиент последний раз обращался к серверу.
-
-## Общие ручки
-
-### Каталоги
-
-Telegram получает JSON:
+Текущий формат:
 
 ```text
-GET /catalogs
+uid
+имя выбранного каталога
+custom OPDS URL
+server URL
 ```
 
-PocketBook использует ту же ручку в простом текстовом формате:
+Старый конфиг без четвёртой строки совместим: используется встроенный адрес сервера.
+
+## API
+
+PocketBook использует те же ресурсы, что и другие клиенты, но для простого парсинга может запросить `plain=1`.
+
+### Каталоги
 
 ```text
 GET /catalogs?plain=1
@@ -43,31 +44,16 @@ GET /catalogs?plain=1
 ### Профиль
 
 ```text
-GET /users/{uid}
 GET /users/{uid}?plain=1
 ```
 
-### Выбор каталога
-
-Обычный API:
-
-```text
-PATCH /users/{uid}/catalog
-```
-
-PocketBook GET-вариант для `QuickDownload()`:
+### Выбор встроенного каталога
 
 ```text
 GET /users/{uid}/catalog?catalog_id=3&plain=1
 ```
 
-### Пользовательский OPDS
-
-```text
-PATCH /users/{uid}/opds
-```
-
-PocketBook:
+### Custom OPDS
 
 ```text
 GET /users/{uid}/opds?opds_url=<url>&plain=1
@@ -75,100 +61,96 @@ GET /users/{uid}/opds?opds_url=<url>&plain=1
 
 ### Поиск
 
-Одна ручка для Telegram и PocketBook:
-
 ```text
-GET /search
+GET /search?uid=<uid>&query=<query>&plain=1
 ```
 
-Telegram:
+Формат ответа:
 
 ```text
-GET /search?telegram_id=123&query=лукьяненко
+COUNT	20
+BOOK	<title>	<author>	<url>
+BOOK	<title>	<author>	<url>
+NEXT	<page_token>
 ```
 
-PocketBook:
-
-```text
-GET /search?uid=<uid>&query=лукьяненко&plain=1
-```
-
-Ответ PocketBook:
-
-```text
-COUNT\t20
-BOOK\t<title>\t<author>\t<url>
-BOOK\t<title>\t<author>\t<url>
-NEXT\t<page_url>
-```
-
-Название, автор, URL и следующая страница percent-encoded.
-
-
+Строковые поля percent-encoded.
 
 ### Скачивание
-
-Одна ручка:
-
-```text
-GET /download
-```
-
-Telegram:
-
-```text
-GET /download?telegram_id=123&url=<book_url>
-```
-
-PocketBook:
 
 ```text
 GET /download?uid=<uid>&url=<book_url>
 ```
 
-Сервер всегда возвращает EPUB клиенту.
-
-Если у пользователя настроены email, сервер дополнительно отправляет EPUB на них. У PocketBook-пользователя email не обязателен.
-
-URL книги всё равно проходит через `safe_http`, поэтому отдельные подписанные токены не нужны.
-
-## PocketBook client
-
-Исходник:
+Для PocketBook backend использует streaming download:
 
 ```text
-pocketbook/main.c
+book source -> BookFerry -> PocketBook
 ```
 
-Клиент хранит:
+BookFerry не ждёт полной загрузки EPUB перед началом ответа клиенту и не создаёт временный файл.
 
-```text
-uid
-имя текущей библиотеки
-custom OPDS URL, если используется
-```
+PocketBook download flow не отправляет книгу по e-mail. E-mail delivery используется Telegram-клиентом.
 
-Ридер больше не знает структуру Flibusta, Gutenberg или AmuseWiki.
+URL книги проходит через `safe_http` validation.
 
-Поиск и скачивание идут через BookFerry Server.
+## Сохранение книги
 
-EPUB сохраняется в:
+После получения данных клиент проверяет ZIP/EPUB signature (`PK`) и сохраняет книгу в:
 
 ```text
 /mnt/ext1/Books
 ```
 
-Сканирование библиотеки запускается вручную кнопкой `Обн. библиотеку`.
+Локальное имя формируется из автора и названия книги:
+
+```text
+Автор - Название.epub
+```
+
+Недопустимые для имени файла символы заменяются.
+
+## Интерфейс
+
+Главный экран содержит:
+
+- выбор библиотеки;
+- поле названия или автора;
+- кнопку поиска;
+- ручное обновление библиотеки;
+- экран «О программе».
+
+Результаты показываются по 5 книг на экран.
+
+Встроенные каталоги и custom OPDS выбираются через один экран библиотек.
+
+## Обновление библиотеки PocketBook
+
+После скачивания EPUB пользователь может вручную запустить системное сканирование кнопкой `Обн. библиотеку`.
+
+Автоматический scan после каждого скачивания намеренно не используется: на устройствах с большой медиатекой он может занимать заметное время.
 
 ## Smoke test
 
+Backend flow можно проверить без физического ридера:
+
 ```bash
 python scripts/smoke_pocketbook.py \
-  --base-url https://api.heartlab.app \
+  --base-url http://127.0.0.1:8000 \
   --query "лабиринт отражений"
 ```
 
-Успешный финал:
+Smoke test выполняет:
+
+```text
+register
+  -> catalogs
+  -> select catalog
+  -> search
+  -> download
+```
+
+Успешный результат:
 
 ```text
 POCKETBOOK SMOKE: PASSED
