@@ -341,7 +341,11 @@ def _download_result(request: Request, user, url: str):
 
     try:
         for email in emails:
-            send_file(recipient_email=email, file_path=path)
+            send_file(
+                recipient_email=email,
+                file_path=path,
+                subject=user["subject"],
+            )
 
         log_event(
             logger,
