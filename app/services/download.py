@@ -7,6 +7,9 @@ import requests
 from app.services.safe_http import safe_get
 
 
+STREAM_CHUNK_SIZE = 64 * 1024
+
+
 def _filename_from_response(response: requests.Response) -> str:
     content_disposition = response.headers.get("Content-Disposition", "")
 
@@ -30,6 +33,32 @@ def _filename_from_response(response: requests.Response) -> str:
         return f"{final_name}.epub"
 
     return "book.epub"
+
+
+def open_book_stream(url: str) -> tuple[requests.Response, str]:
+    response = safe_get(
+        url,
+        timeout=(10, 120),
+        stream=True,
+    )
+
+    try:
+        response.raise_for_status()
+        filename = _filename_from_response(response)
+    except Exception:
+        response.close()
+        raise
+
+    return response, filename
+
+
+def iter_book_stream(response: requests.Response):
+    try:
+        for chunk in response.iter_content(chunk_size=STREAM_CHUNK_SIZE):
+            if chunk:
+                yield chunk
+    finally:
+        response.close()
 
 
 def download_book(url: str) -> str:
