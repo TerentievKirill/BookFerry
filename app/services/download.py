@@ -1,6 +1,5 @@
 import os
 import re
-import tempfile
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -75,34 +74,17 @@ def download_book(url: str) -> str:
     finally:
         response.close()
 
-    temp_root = os.path.join(os.getcwd(), "Temp")
-    os.makedirs(temp_root, exist_ok=True)
+    temp_dir = os.path.join(os.getcwd(), "Temp")
+    os.makedirs(temp_dir, exist_ok=True)
 
-    request_dir = tempfile.mkdtemp(prefix="download_", dir=temp_root)
-    path = os.path.join(request_dir, filename)
+    path = os.path.join(temp_dir, filename)
 
-    try:
-        with open(path, "wb") as file:
-            file.write(content)
-    except Exception:
-        try:
-            os.rmdir(request_dir)
-        except OSError:
-            pass
-        raise
+    with open(path, "wb") as file:
+        file.write(content)
 
     return path
 
 
 def remove_book(path):
-    temp_root = os.path.abspath(os.path.join(os.getcwd(), "Temp"))
-    parent_dir = os.path.abspath(os.path.dirname(path))
-
     if os.path.exists(path):
         os.remove(path)
-
-    if os.path.dirname(parent_dir) == temp_root:
-        try:
-            os.rmdir(parent_dir)
-        except OSError:
-            pass
