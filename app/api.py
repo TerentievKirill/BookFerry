@@ -413,6 +413,53 @@ def download_get(
     return _download_result(request, user, url)
 
 
+@router.get("/download/client-result", response_class=PlainTextResponse)
+def download_client_result(
+    request: Request,
+    uid: str = Query(..., min_length=1, max_length=64),
+    status: str = Query(..., min_length=1, max_length=16),
+    bytes_received: int = Query(0, alias="bytes", ge=0),
+    attempts: int = Query(1, ge=1, le=5),
+    duration_ms: int = Query(0, ge=0),
+    http_status: int = Query(0),
+    net_status: int = Query(0),
+    title: str | None = Query(None, max_length=300),
+    error: str | None = Query(None, max_length=200),
+):
+    user = _resolve_user(uid=uid)
+
+    if user["client_type"] != "pocketbook":
+        raise HTTPException(
+            status_code=400,
+            detail="Результат загрузки принимается только от PocketBook",
+        )
+
+    result = status.strip().lower()
+    if result not in {"success", "error"}:
+        raise HTTPException(
+            status_code=400,
+            detail="status должен быть success или error",
+        )
+
+    log_event(
+        logger,
+        request,
+        "DOWNLOAD_CLIENT_RESULT",
+        level=logging.INFO if result == "success" else logging.WARNING,
+        **_log_identity(user),
+        result=result,
+        title=title or "-",
+        bytes=bytes_received,
+        attempts=attempts,
+        duration_ms=duration_ms,
+        http_status=http_status,
+        net_status=net_status,
+        error=error or "-",
+    )
+
+    return PlainTextResponse("OK\n")
+
+
 @router.post("/send-book")
 def send_book_post(data: SendBookRequest, request: Request):
     """Compatibility for the current Telegram bot. New clients use GET /download."""
