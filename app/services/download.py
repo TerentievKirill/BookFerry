@@ -20,19 +20,17 @@ def _filename_from_response(response: requests.Response) -> str:
             flags=re.IGNORECASE,
         )
         if match:
-            filename = unquote(match.group(1).strip().strip('"'))
+            filename = os.path.basename(
+                unquote(match.group(1).strip().strip('"'))
+            )
             if filename:
-                return os.path.basename(filename)
+                return filename
 
-    final_name = unquote(os.path.basename(urlparse(response.url).path))
+    filename = unquote(os.path.basename(urlparse(response.url).path))
+    if filename:
+        return filename
 
-    if final_name.lower().endswith(".epub"):
-        return final_name
-
-    if final_name:
-        return f"{final_name}.epub"
-
-    return "book.epub"
+    raise ValueError("Сервер не передал имя файла")
 
 
 def open_book_stream(url: str) -> tuple[requests.Response, str]:
