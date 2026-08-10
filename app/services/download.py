@@ -59,7 +59,7 @@ def iter_book_stream(response: requests.Response):
         response.close()
 
 
-def download_book(url: str) -> str:
+def download_book(url: str) -> tuple[bytes, str]:
     response = safe_get(
         url,
         timeout=(10, 120),
@@ -72,17 +72,4 @@ def download_book(url: str) -> str:
     finally:
         response.close()
 
-    temp_dir = os.path.join(os.getcwd(), "Temp")
-    os.makedirs(temp_dir, exist_ok=True)
-
-    path = os.path.join(temp_dir, filename)
-
-    with open(path, "wb") as file:
-        file.write(content)
-
-    return path
-
-
-def remove_book(path):
-    if os.path.exists(path):
-        os.remove(path)
+    return content, filename
