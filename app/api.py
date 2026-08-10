@@ -1,13 +1,11 @@
 import logging
-import os
 import sqlite3
 import time
 from urllib.parse import quote
 
 import requests
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from app.db.catalogs import get_catalog, get_catalogs
 from app.db.users import (
@@ -42,7 +40,6 @@ from app.services.download import (
     download_book,
     iter_book_stream,
     open_book_stream,
-    remove_book,
 )
 from app.services.local_search import search_local_catalog
 from app.services.mail import send_file
@@ -315,7 +312,7 @@ def _download_result(request: Request, user, url: str):
         return _stream_pocketbook_download(request, identity, url)
 
     try:
-        path = download_book(url)
+        content, filename = download_book(url)
     except requests.RequestException as error:
         log_event(
             logger,
@@ -343,7 +340,8 @@ def _download_result(request: Request, user, url: str):
         for email in emails:
             send_file(
                 recipient_email=email,
-                file_path=path,
+                file_content=content,
+                filename=filename,
                 subject=user["subject"],
             )
 
@@ -352,19 +350,22 @@ def _download_result(request: Request, user, url: str):
             request,
             "DOWNLOAD_RESULT",
             **identity,
-            filename=os.path.basename(path),
+            filename=filename,
             email_count=len(emails),
             result="success",
         )
 
-        return FileResponse(
-            path=path,
-            filename=os.path.basename(path),
+        return Response(
+            content=content,
             media_type="application/epub+zip",
-            background=BackgroundTask(remove_book, path),
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''"
+                    f"{quote(filename, safe='')}"
+                )
+            },
         )
     except Exception as error:
-        remove_book(path)
         log_event(
             logger,
             request,
