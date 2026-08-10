@@ -11,12 +11,16 @@ from app.config import (
 )
 
 
-def send_file(recipient_email: str, file_path: str):
+def send_file(
+    recipient_email: str,
+    file_path: str,
+    subject: str | None = None,
+):
     with open(file_path, "rb") as file:
         file_data = file.read()
 
     msg = EmailMessage()
-    msg["Subject"] = DEFAULT_SUBJECT
+    msg["Subject"] = subject or DEFAULT_SUBJECT
     msg["From"] = SMTP_LOGIN
     msg["To"] = recipient_email
     msg.set_content("")
