@@ -15,6 +15,11 @@
 #define MAX_CATALOGS 20
 #define ITEMS_PER_PAGE 5
 #define URL_LEN 8192
+#define BOOKS_DIR "/mnt/ext1/Books"
+#define DOWNLOAD_ATTEMPTS 2
+#define DOWNLOAD_SESSION_TIMEOUT 45
+#define DOWNLOAD_TOTAL_TIMEOUT 60
+#define DOWNLOAD_REPORT_TIMEOUT 5
 
 enum {
     MODE_HOME = 0,
@@ -34,6 +39,13 @@ typedef struct {
     bool custom;
     char name[256];
 } CatalogEntry;
+
+typedef struct {
+    int http_status;
+    int net_status;
+    long bytes;
+    char error[64];
+} DownloadTransportResult;
 
 ifont *font;
 irect main_rect;
@@ -628,15 +640,232 @@ static bool load_next_page() {
     return entries_count > old_count;
 }
 
+static bool file_is_epub(const char *path, long *size_out) {
+    FILE *file;
+    unsigned char signature[2];
+    long size;
+
+    if (size_out) *size_out = 0;
+    if (!path || !path[0]) return false;
+
+    file = fopen(path, "rb");
+    if (!file) return false;
+
+    if (fread(signature, 1, sizeof(signature), file) != sizeof(signature)) {
+        fclose(file);
+        return false;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return false;
+    }
+
+    size = ftell(file);
+    fclose(file);
+
+    if (size_out && size > 0) *size_out = size;
+
+    return (
+        size > 2 &&
+        signature[0] == 'P' &&
+        signature[1] == 'K'
+    );
+}
+
+static void set_transport_error(
+    DownloadTransportResult *result,
+    const char *error
+) {
+    if (!result) return;
+    safe_copy(
+        result->error,
+        error ? error : "unknown",
+        sizeof(result->error)
+    );
+}
+
+static bool download_to_temp_file(
+    const char *url,
+    const char *tmp_path,
+    DownloadTransportResult *result
+) {
+    int session;
+    int start_result;
+    int status = NET_OK;
+    iv_sessioninfo *info;
+    time_t started;
+    bool completed = false;
+
+    if (!url || !url[0] || !tmp_path || !tmp_path[0] || !result) {
+        return false;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->net_status = NET_OK;
+    safe_copy(result->error, "unknown", sizeof(result->error));
+
+    remove(tmp_path);
+
+    session = NewSession();
+    if (session < 0) {
+        set_transport_error(result, "new_session_failed");
+        return false;
+    }
+
+    info = GetSessionInfo(session);
+    if (info) info->response = 0;
+
+    start_result = DownloadTo(
+        session,
+        url,
+        NULL,
+        tmp_path,
+        DOWNLOAD_SESSION_TIMEOUT
+    );
+
+    if (start_result != 0) {
+        set_transport_error(result, "download_start_failed");
+        CloseSession(session);
+        remove(tmp_path);
+        return false;
+    }
+
+    started = time(NULL);
+
+    while ((time(NULL) - started) < DOWNLOAD_TOTAL_TIMEOUT) {
+        status = GetSessionStatus(session);
+        result->net_status = status;
+        info = GetSessionInfo(session);
+
+        if (info) {
+            result->http_status = (int)info->response;
+            if (info->progress >= 0) {
+                result->bytes = info->progress;
+            }
+        }
+
+        if (status < 0) {
+            char error[64];
+            snprintf(error, sizeof(error), "network_%d", status);
+            set_transport_error(result, error);
+            break;
+        }
+
+        if (info && info->response != 0) {
+            if (info->response >= 200 && info->response < 300) {
+                completed = true;
+            } else {
+                char error[64];
+                snprintf(
+                    error,
+                    sizeof(error),
+                    "http_%ld",
+                    info->response
+                );
+                set_transport_error(result, error);
+            }
+            break;
+        }
+
+        GoSleep(250, 1);
+    }
+
+    CloseSession(session);
+
+    if (!completed && strcmp(result->error, "unknown") == 0) {
+        set_transport_error(result, "transport_timeout");
+    }
+
+    if (completed) {
+        long file_size = 0;
+
+        if (!file_is_epub(tmp_path, &file_size)) {
+            set_transport_error(result, "invalid_epub");
+            result->bytes = file_size;
+            completed = false;
+        } else {
+            result->bytes = file_size;
+            result->error[0] = '\0';
+        }
+    }
+
+    if (!completed) {
+        remove(tmp_path);
+    }
+
+    return completed;
+}
+
+static void report_download_client_result(
+    const BookEntry *book,
+    const char *status,
+    long bytes,
+    int attempts,
+    long duration_ms,
+    int http_status,
+    int net_status,
+    const char *error
+) {
+    char encoded_title[1024];
+    char encoded_error[512];
+    char report_url[URL_LEN];
+    char *response;
+
+    if (!user_uid[0] || !status || !status[0]) return;
+
+    url_encode(
+        book && book->title[0] ? book->title : "-",
+        encoded_title,
+        sizeof(encoded_title)
+    );
+    url_encode(
+        error && error[0] ? error : "-",
+        encoded_error,
+        sizeof(encoded_error)
+    );
+
+    snprintf(
+        report_url,
+        sizeof(report_url),
+        "%s/download/client-result"
+        "?uid=%s"
+        "&status=%s"
+        "&bytes=%ld"
+        "&attempts=%d"
+        "&duration_ms=%ld"
+        "&http_status=%d"
+        "&net_status=%d"
+        "&title=%s"
+        "&error=%s",
+        server_url,
+        user_uid,
+        status,
+        bytes,
+        attempts,
+        duration_ms,
+        http_status,
+        net_status,
+        encoded_title,
+        encoded_error
+    );
+
+    response = http_get_text(report_url, DOWNLOAD_REPORT_TIMEOUT);
+    if (response) free(response);
+}
+
 static void download_book_to_device(BookEntry *book) {
     char encoded_url[6144];
     char url[URL_LEN];
     char filename[256];
     char filepath[512];
-    int size = 0;
-    void *data;
-    FILE *file;
-    size_t written;
+    char tmp_path[560];
+    char stale_tmp[560];
+    DownloadTransportResult transport;
+    int attempt;
+    int i;
+    bool success = false;
+    time_t started;
 
     if (!book || !book->url[0] || !user_uid[0]) return;
 
@@ -651,26 +880,7 @@ static void download_book_to_device(BookEntry *book) {
         encoded_url
     );
 
-    show_progress("Скачивание EPUB...");
-    data = QuickDownload(url, &size, 120);
-
-    if (
-        !data ||
-        size < 2 ||
-        ((unsigned char *)data)[0] != 'P' ||
-        ((unsigned char *)data)[1] != 'K'
-    ) {
-        if (data) free(data);
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Не удалось скачать EPUB",
-            3000
-        );
-        return;
-    }
-
-    system("mkdir -p /mnt/ext1/Books");
+    system("mkdir -p " BOOKS_DIR);
 
     snprintf(
         filename,
@@ -686,42 +896,96 @@ static void download_book_to_device(BookEntry *book) {
     snprintf(
         filepath,
         sizeof(filepath),
-        "/mnt/ext1/Books/%s",
+        BOOKS_DIR "/%s",
         filename
     );
 
-    file = fopen(filepath, "wb");
-    if (!file) {
-        free(data);
+    memset(&transport, 0, sizeof(transport));
+    started = time(NULL);
+
+    for (attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
+        snprintf(
+            tmp_path,
+            sizeof(tmp_path),
+            "%s.part%d",
+            filepath,
+            attempt
+        );
+
+        show_progress(
+            attempt == 1
+                ? "Скачивание EPUB..."
+                : "Повтор загрузки..."
+        );
+
+        if (download_to_temp_file(url, tmp_path, &transport)) {
+            if (rename(tmp_path, filepath) == 0) {
+                success = true;
+                break;
+            }
+
+            set_transport_error(&transport, "rename_failed");
+            remove(tmp_path);
+        }
+
+        if (
+            transport.http_status >= 400 &&
+            transport.http_status < 500
+        ) {
+            break;
+        }
+    }
+
+    for (i = 1; i <= DOWNLOAD_ATTEMPTS; i++) {
+        snprintf(
+            stale_tmp,
+            sizeof(stale_tmp),
+            "%s.part%d",
+            filepath,
+            i
+        );
+        remove(stale_tmp);
+    }
+
+    if (success) {
+        report_download_client_result(
+            book,
+            "success",
+            transport.bytes,
+            attempt,
+            (long)(time(NULL) - started) * 1000L,
+            transport.http_status,
+            transport.net_status,
+            NULL
+        );
+
         Message(
-            ICON_ERROR,
+            ICON_INFORMATION,
             "BookFerry",
-            "Не удалось сохранить файл",
-            3000
+            "EPUB скачан в папку Books",
+            2200
         );
         return;
     }
 
-    written = fwrite(data, 1, size, file);
-    fclose(file);
-    free(data);
-
-    if (written != (size_t)size) {
-        remove(filepath);
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Ошибка записи файла",
-            3000
-        );
-        return;
-    }
+    report_download_client_result(
+        book,
+        "error",
+        transport.bytes,
+        attempt > DOWNLOAD_ATTEMPTS
+            ? DOWNLOAD_ATTEMPTS
+            : attempt,
+        (long)(time(NULL) - started) * 1000L,
+        transport.http_status,
+        transport.net_status,
+        transport.error
+    );
 
     Message(
-        ICON_INFORMATION,
+        ICON_ERROR,
         "BookFerry",
-        "EPUB скачан в папку Books",
-        2200
+        "Не удалось скачать EPUB",
+        3000
     );
 }
 

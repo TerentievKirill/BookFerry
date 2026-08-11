@@ -1,275 +1,177 @@
 # BookFerry
 
-BookFerry — backend-сервис для поиска электронных книг и доставки EPUB на электронные книги и другие устройства.
+BookFerry — сервис поиска и доставки EPUB-книг для PocketBook и Telegram.
 
-Основная идея проекта: **искать быстро по локальному индексу, а сам файл книги скачивать только в момент выбора пользователем**.
+Проект состоит из FastAPI backend, локального полнотекстового каталога книг и нативного клиента для PocketBook. Telegram-бот находится в отдельном репозитории: [BookFerryBot](https://github.com/TerentievKirill/BookFerryBot).
 
-BookFerry не хранит библиотеку EPUB-файлов на сервере. В локальной SQLite-базе находятся только метаданные книг: источник, внешний ID, название, автор и язык. После выбора книги backend скачивает EPUB у исходного каталога, отправляет его по e-mail и возвращает файл клиенту.
+Главная идея: **метаданные ищутся локально, а файл книги загружается у источника только после выбора пользователем**. BookFerry не хранит постоянную коллекцию EPUB на сервере.
 
-Проект развивается как общий backend для нескольких клиентов:
+> Текущий контракт проекта — EPUB only.
 
-- Telegram-бота;
-- PocketBook-приложения;
-- будущего Flutter-клиента.
+## Возможности
 
-> Текущее правило проекта: **поддерживается только EPUB**.
+- локальный поиск по названию и автору через SQLite FTS5;
+- четыре встроенных книжных каталога;
+- пользовательский OPDS 1.x / Atom / OpenSearch;
+- единая модель пользователей для разных клиентов;
+- нативный клиент PocketBook на C / InkView;
+- Telegram-клиент с отправкой книги в чат и на один или несколько e-mail;
+- пользовательская тема e-mail;
+- потоковая передача EPUB для PocketBook;
+- SSRF-защита для пользовательских OPDS и URL скачивания;
+- безопасная атомарная пересборка большого книжного индекса;
+- автоматическое ежедневное обновление каталогов;
+- request ID и структурированные серверные логи;
+- Docker / Docker Compose.
 
----
+Подробное устройство проекта описано в [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Что уже умеет BookFerry
+## Архитектура в двух словах
 
-- быстрый локальный поиск по названию и автору через SQLite FTS5;
-- несколько встроенных книжных каталогов;
-- персональный выбор каталога для пользователя;
-- подключение собственного OPDS-каталога;
-- загрузка EPUB только после выбора книги;
-- отправка EPUB на один или несколько e-mail;
-- пользовательские настройки и UUID-профили;
-- Telegram-совместимые API-ручки;
-- отдельная база метаданных книг;
-- безопасная атомарная пересборка каталога;
-- автоматическое ежедневное обновление встроенных каталогов;
-- Docker / Docker Compose;
-- Swagger UI через FastAPI.
+```mermaid
+flowchart TD
+    PB[PocketBook] --> API[FastAPI]
+    TG[Telegram bot] --> API
 
----
+    API --> USERS[(bookferry.db)]
+    API --> SEARCH{Источник поиска}
+
+    SEARCH -->|built-in| FTS[(catalog.db / FTS5)]
+    SEARCH -->|custom| OPDS[OPDS / OpenSearch]
+
+    FTS --> URL[EPUB URL]
+    OPDS --> URL
+    URL --> SOURCE[Внешний источник]
+
+    SOURCE -->|stream| PB
+    SOURCE -->|bytes| TG
+    SOURCE -->|bytes| SMTP[SMTP]
+```
+
+Пользовательские данные и книжный индекс намеренно разделены:
+
+- `bookferry.db` — пользователи, настройки и список каталогов;
+- `catalog.db` — перестраиваемый индекс метаданных книг и FTS5.
 
 ## Встроенные каталоги
 
-### Русскоязычные
-
 | Код | Каталог | Источник метаданных |
 |---|---|---|
-| `flibusta` | Flibusta | SQL-дампы библиотеки |
+| `flibusta` | Flibusta | SQL dumps |
+| `gutenberg` | Project Gutenberg | официальный CSV catalog |
+| `anarchist` | The Anarchist Library | OPDS / AmuseWiki |
 | `anarchist_ru` | Библиотека Анархизма | OPDS / AmuseWiki |
 
-### Англоязычные
+Для встроенных каталогов пользовательский поиск не обращается к внешнему сайту. Поиск идёт по локальному `catalog.db`, а сеть используется только для обновления метаданных и скачивания выбранного EPUB.
 
-| Код | Каталог | Источник метаданных |
-|---|---|---|
-| `gutenberg` | Project Gutenberg | официальный `pg_catalog.csv.gz` |
-| `anarchist` | The Anarchist Library | OPDS / AmuseWiki |
+## Клиенты
 
-Для встроенных каталогов поиск выполняется **не по сети**, а по локальной базе `catalog.db`.
+### PocketBook
 
-Внешний сайт используется только для:
+Исходник клиента находится в `pocketbook/main.c`.
 
-1. обновления метаданных;
-2. скачивания выбранного EPUB.
-
----
-
-## Пользовательский OPDS
-
-Пользователь может указать собственный OPDS URL.
-
-Backend:
-
-1. открывает URL;
-2. проверяет, что получен Atom/OPDS feed;
-3. ищет `rel="search"`;
-4. при необходимости читает OpenSearch Description;
-5. сохраняет поисковый шаблон с `{searchTerms}`;
-6. использует этот OPDS только для конкретного пользователя.
-
-Пользовательский OPDS **не импортируется** в общий `catalog.db`.
-
-Поддерживаемый сейчас вариант — OPDS 1.x / Atom + OpenSearch и EPUB acquisition links.
-
-OPDS 2.0 JSON пока не реализован.
-
-### Безопасность custom OPDS
-
-Так как URL вводится пользователем, сетевые запросы проходят через дополнительную проверку:
-
-- разрешены только `http://` и `https://`;
-- запрещены URL с логином/паролем;
-- запрещены loopback, private, link-local и другие внутренние IP;
-- каждый redirect проверяется заново;
-- аналогичная проверка выполняется при фактическом скачивании EPUB.
-
-Это защищает backend от использования пользовательского OPDS как SSRF-прокси к внутренней сети сервера.
-
----
-
-## Архитектура
+При первом запуске приложение регистрируется на backend и получает UUID `uid`, который сохраняется в:
 
 ```text
-                    ┌────────────────────┐
-                    │ Telegram / PB / UI │
-                    └─────────┬──────────┘
-                              │
-                              ▼
-                       ┌─────────────┐
-                       │   FastAPI   │
-                       └──────┬──────┘
-                              │
-              ┌───────────────┴────────────────┐
-              │                                │
-              ▼                                ▼
-      встроенный каталог                 custom OPDS
-              │                                │
-              ▼                                ▼
-       SQLite FTS5 search             Atom + OpenSearch
-              │                                │
-              └───────────────┬────────────────┘
-                              │
-                              ▼
-                       выбранный EPUB URL
-                              │
-                              ▼
-                       download.py
-                         │       │
-                         ▼       ▼
-                    HTTP file   SMTP
-                         │       │
-                         └───┬───┘
-                             ▼
-                         пользователь
+/mnt/ext1/system/config/BookFerry/config.cfg
 ```
 
----
+PocketBook умеет:
 
-## Две SQLite-базы
+- выбирать встроенный каталог;
+- подключать собственный OPDS;
+- искать по названию или автору;
+- перелистывать результаты;
+- скачивать EPUB в `/mnt/ext1/Books`;
+- вручную запускать обновление библиотеки ридера.
 
-BookFerry специально разделяет пользовательские данные и большой перестраиваемый индекс книг.
+Для простого C-клиента те же API могут отдавать компактный текстовый формат через `plain=1`.
 
-### `bookferry.db`
+Скачивание для PocketBook работает потоково: backend начинает передавать EPUB клиенту сразу после получения ответа от источника, не дожидаясь полной загрузки файла на сервер.
 
-Хранит данные, которые нельзя терять при обновлении книжного индекса:
+Дополнительные детали — в [pocketbook/README.md](pocketbook/README.md).
+
+### Telegram
+
+Telegram-бот находится в отдельном репозитории [BookFerryBot](https://github.com/TerentievKirill/BookFerryBot) и использует тот же backend.
+
+После выбора книги backend:
+
+1. загружает EPUB в память;
+2. отправляет те же байты на настроенные e-mail;
+3. возвращает EPUB боту;
+4. бот отправляет файл пользователю в Telegram.
+
+Временные файлы для этой цепочки не используются, поэтому параллельные запросы одной книги не конфликтуют между собой.
+
+## Поиск
+
+### Встроенный каталог
 
 ```text
-users
-catalogs
+запрос пользователя
+      ↓
+SQLite FTS5 по title + author
+      ↓
+external_id книги
+      ↓
+построение URL конкретного источника
+      ↓
+результат клиенту
 ```
 
-Основные поля пользователя:
-
-```text
-uid
-client_type
-external_id
-catalog_id
-custom_opds_url
-custom_opds_search_template
-emails
-subject
-created_at
-```
-
-### `catalog.db`
-
-Полностью перестраиваемая база метаданных:
-
-```text
-books
-books_fts
-```
-
-`books`:
-
-```text
-id
-catalog_code
-external_id
-title
-author
-language
-```
-
-Файлы книг в этой базе **не хранятся**.
-
-FTS5 индексирует `title` и `author`.
-
----
-
-## Как работает поиск
-
-Для встроенного каталога:
-
-```text
-query
-  ↓
-нормализация слов
-  ↓
-SQLite FTS5
-  ↓
-books
-  ↓
-external_id
-  ↓
-EPUB URL конкретного источника
-```
-
-Поиск поддерживает префиксы слов. Например, запрос:
-
-```text
-лабиринт лукьян
-```
-
-может найти книгу по сочетанию названия и автора.
-
-Пагинация совместима с Telegram-ботом: backend возвращает `next_page_url`, который для локального поиска является внутренним токеном вида:
+Размер страницы локального поиска — 20 записей. Пагинация использует внутренние токены:
 
 ```text
 local:20
 local:40
+local:60
 ```
 
----
+URL скачивания не хранится в `catalog.db`. Он строится из `catalog_code`, `base_url` и `external_id`.
 
-## EPUB URL встроенных каталогов
+### Пользовательский OPDS
 
-URL книги не хранится в `catalog.db` — он строится по `catalog_code` и `external_id`.
+Custom OPDS остаётся персональным сетевым источником пользователя и не импортируется в общий индекс.
 
-Принцип:
+При подключении backend:
 
-```text
-Flibusta
-external_id = BookID
-→ /b/{BookID}/epub
+1. проверяет URL;
+2. загружает Atom/OPDS feed;
+3. ищет `rel="search"`;
+4. при необходимости читает OpenSearch Description;
+5. сохраняет поисковый шаблон;
+6. использует его только для этого пользователя.
 
-Project Gutenberg
-external_id = ebook ID
-→ /ebooks/{id}.epub3.images
+Сейчас поддерживаются OPDS 1.x / Atom / OpenSearch и EPUB acquisition links.
 
-AmuseWiki-каталоги
-external_id = slug
-→ /library/{slug}.epub
-```
+## Безопасность внешних URL
 
-Это позволяет хранить индекс компактным и не привязывать метаданные к полному URL.
+Пользовательские URL обрабатываются через `app/services/safe_http.py`.
 
----
+Проверки включают:
 
-## Обновление каталогов
+- только `http://` и `https://`;
+- запрет URL с логином или паролем;
+- запрет loopback, private, link-local и других non-global IP;
+- повторную проверку каждого redirect;
+- ту же проверку перед фактическим скачиванием EPUB.
 
-Для ручной работы есть отдельные импортёры:
+Это не позволяет использовать BookFerry как SSRF-прокси к внутренней сети сервера.
 
-```text
-scripts/import_flibusta.py
-scripts/import_gutenberg.py
-scripts/import_anarchist.py
-scripts/import_anarchist_ru.py
-```
+## Обновление книжного индекса
 
-Одиночный импорт строит временный `catalog.db.new`, сохраняет остальные каталоги, пересобирает общий FTS и только после успешного завершения заменяет рабочую базу.
-
-Для production используется:
+Основной production updater:
 
 ```text
 scripts/update_all_catalogs.py
 ```
 
-Он создаёт полный новый snapshot всех встроенных каталогов и заменяет рабочий `catalog.db` только после успешного импорта и проверок.
+Он строит новый snapshot всех встроенных каталогов отдельно от рабочей базы, проверяет минимальное количество записей и `PRAGMA integrity_check`, после чего атомарно заменяет `catalog.db`.
 
-Если обновление оборвалось, текущая рабочая база остаётся нетронутой.
+Если импорт или проверка завершаются ошибкой, рабочий индекс остаётся прежним.
 
-Также используется lock-файл, предотвращающий одновременный запуск двух обновлений.
-
-### Проверки перед заменой базы
-
-Ночной updater проверяет минимальное количество записей:
+Минимальные защитные значения:
 
 ```text
 Flibusta             >= 500 000
@@ -278,32 +180,50 @@ The Anarchist Library >= 10 000
 Библиотека Анархизма  >= 500
 ```
 
-и выполняет:
+От одновременного запуска двух обновлений защищает lock-файл.
 
-```sql
-PRAGMA integrity_check;
-```
+В `deploy/` находятся systemd unit и timer для ежедневного запуска в `03:00 Asia/Almaty`.
 
----
+## API
 
-## Ежедневное обновление
+FastAPI автоматически публикует Swagger UI в `/docs`.
 
-В `deploy/` находятся unit-файлы systemd:
+Основные общие ручки:
+
+| Метод | Endpoint | Назначение |
+|---|---|---|
+| `GET` | `/health` | health check |
+| `GET` | `/catalogs` | список каталогов |
+| `POST` / `GET` | `/users/register` | регистрация клиента |
+| `GET` | `/users/{uid}` | профиль |
+| `PATCH` / `GET` | `/users/{uid}/catalog` | выбор каталога |
+| `PATCH` / `GET` | `/users/{uid}/opds` | custom OPDS |
+| `PATCH` | `/users/{uid}/emails` | e-mail пользователя |
+| `PATCH` | `/users/{uid}/subject` | тема письма |
+| `GET` | `/search` | общий поиск по `uid` или `telegram_id` |
+| `GET` | `/download` | общее скачивание по `uid` или `telegram_id` |
+
+Для совместимости с текущим Telegram-ботом также сохранены:
 
 ```text
-deploy/bookferry-catalog-update.service
-deploy/bookferry-catalog-update.timer
+POST /search
+POST /send-book
+GET/PATCH /users/telegram/{telegram_id}/...
 ```
 
-Расписание:
+## Логирование
+
+Каждый HTTP-запрос получает `request_id`. Если клиент передаёт корректный `X-Request-ID`, backend сохраняет его; иначе создаёт новый.
+
+Пример:
 
 ```text
-03:00 Asia/Almaty
+2026-08-10 13:05:47+0500 | INFO | bookferry.api | request_id=... DOWNLOAD ...
+2026-08-10 13:05:47+0500 | INFO | bookferry.api | request_id=... DOWNLOAD_RESULT ...
+2026-08-10 13:05:47+0500 | INFO | bookferry.access | request_id=... HTTP method=GET path=/download status=200 ...
 ```
 
-Таймер запускает обновление каталогов внутри контейнера `bookferry`.
-
----
+PocketBook streaming дополнительно логирует время получения upstream response и полный объём переданных данных.
 
 ## Стек
 
@@ -313,21 +233,19 @@ deploy/bookferry-catalog-update.timer
 - SQLite / FTS5
 - Requests
 - lxml
-- python-dotenv
 - SMTP
-- Docker
-- Docker Compose
-- systemd timer
+- Docker / Docker Compose
+- systemd
+- C / PocketBook InkView SDK
 
----
-
-## Структура проекта
+## Структура репозитория
 
 ```text
 BookFerry/
 ├── app/
 │   ├── api.py
 │   ├── config.py
+│   ├── logging_config.py
 │   ├── models.py
 │   ├── db/
 │   │   ├── database.py
@@ -340,29 +258,30 @@ BookFerry/
 │       ├── safe_http.py
 │       ├── download.py
 │       └── mail.py
+├── pocketbook/
+│   ├── main.c
+│   └── README.md
 ├── scripts/
 │   ├── catalog_utils.py
 │   ├── import_flibusta.py
 │   ├── import_gutenberg.py
 │   ├── import_anarchist.py
 │   ├── import_anarchist_ru.py
-│   ├── migrate_custom_opds.py
-│   └── update_all_catalogs.py
+│   ├── update_all_catalogs.py
+│   └── smoke_pocketbook.py
 ├── deploy/
 │   ├── bookferry-catalog-update.service
 │   └── bookferry-catalog-update.timer
+├── ARCHITECTURE.md
 ├── main.py
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt
-└── README.md
+└── requirements.txt
 ```
 
----
+## Запуск
 
-## Конфигурация
-
-Пример `.env`:
+Создайте `.env`:
 
 ```env
 SMTP_HOST=mail.example.com
@@ -373,20 +292,19 @@ DEFAULT_SUBJECT=BookFerry
 
 DB_NAME=/app/data/bookferry.db
 CATALOG_DB_NAME=/app/data/catalog.db
-
 DEFAULT_OPDS_URL=https://flibusta.is/opds/
 ```
-
-`CATALOG_DB_NAME` необязателен: по умолчанию `catalog.db` создаётся рядом с `DB_NAME`.
-
----
-
-## Docker
 
 Сборка и запуск:
 
 ```bash
 docker compose up -d --build
+```
+
+Проверка:
+
+```bash
+curl http://127.0.0.1:8000/health
 ```
 
 Логи:
@@ -395,193 +313,32 @@ docker compose up -d --build
 docker compose logs -f bookferry
 ```
 
-Остановка:
+Новая `catalog.db` создаётся пустой. Для наполнения встроенных каталогов используется `scripts/update_all_catalogs.py` или отдельные импортёры из `scripts/`.
+
+Полный импорт Flibusta и других источников предназначен для production и может занимать значительное время.
+
+## PocketBook smoke test
+
+После запуска backend можно проверить основной PocketBook flow:
 
 ```bash
-docker compose down
+python scripts/smoke_pocketbook.py \
+  --base-url http://127.0.0.1:8000 \
+  --query "лабиринт отражений"
 ```
 
-В production каталог `/opt/data` хоста монтируется в контейнер как:
+Сценарий проверяет регистрацию, получение каталогов, выбор каталога, поиск и загрузку EPUB.
 
-```text
-/app/data
-```
+## Тестирование
 
----
+Сейчас в репозитории есть end-to-end smoke для PocketBook API. Полный pytest/CI regression suite ещё не добавлен и является следующим техническим этапом проекта.
 
-## API
+## Основные архитектурные принципы
 
-Swagger UI после запуска:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### Health
-
-```http
-GET /health
-```
-
-Ответ:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-### Список встроенных каталогов
-
-```http
-GET /catalogs
-```
-
-### Регистрация клиента
-
-```http
-POST /users/register
-```
-
-```json
-{
-  "client_type": "pocketbook"
-}
-```
-
-Поддерживаемые типы:
-
-```text
-telegram
-pocketbook
-flutter
-```
-
-Backend создаёт UUID `uid`, который клиент может хранить локально и использовать дальше.
-
-### Получение профиля
-
-```http
-GET /users/{uid}
-```
-
-### Выбор встроенного каталога
-
-```http
-PATCH /users/{uid}/catalog
-```
-
-```json
-{
-  "catalog_id": 3
-}
-```
-
-Выбор встроенного каталога автоматически отключает ранее заданный custom OPDS.
-
-### Пользовательский OPDS
-
-```http
-PATCH /users/{uid}/opds
-```
-
-```json
-{
-  "opds_url": "https://example.org/opds"
-}
-```
-
-### Telegram-compatible search
-
-Текущий `/search` пока использует Telegram ID:
-
-```http
-POST /search
-```
-
-```json
-{
-  "telegram_id": 172361118,
-  "query": "лабиринт отражений"
-}
-```
-
-Ответ:
-
-```json
-{
-  "books": [
-    {
-      "author": "Сергей Лукьяненко",
-      "title": "Лабиринт отражений",
-      "url": "https://example.org/book.epub"
-    }
-  ],
-  "next_page_url": "local:20"
-}
-```
-
-### Скачать и отправить книгу
-
-```http
-POST /send-book
-```
-
-```json
-{
-  "telegram_id": 172361118,
-  "url": "https://example.org/book.epub"
-}
-```
-
-Backend:
-
-1. скачивает EPUB во временный каталог;
-2. отправляет его на e-mail пользователя;
-3. возвращает файл клиенту;
-4. удаляет временный файл после ответа.
-
----
-
-## Telegram-бот
-
-Telegram-клиент находится в отдельном репозитории `BookFerryBot`.
-
-Текущий бот использует compatibility API по `telegram_id`.
-
-Старый экран `/setting`, который принимает OPDS URL, остаётся совместимым: теперь backend может распознать встроенный каталог либо сохранить URL как персональный custom OPDS.
-
----
-
-## Что важно не сломать
-
-1. **EPUB-only** — другие форматы пока не входят в контракт проекта.
-2. `bookferry.db` и `catalog.db` решают разные задачи и не должны сливаться в одну большую базу.
-3. Большой импорт не должен писать напрямую в рабочий `catalog.db`.
-4. Рабочая база заменяется только после успешной сборки нового snapshot.
-5. Выбор встроенного каталога должен очищать custom OPDS пользователя.
-6. URL пользовательского OPDS и EPUB обязательно проходят проверку публичного адреса.
-7. Поиск встроенных каталогов должен оставаться локальным — сеть нужна только при обновлении и скачивании книги.
-
----
-
-## Roadmap
-
-Ближайшие логичные шаги:
-
-- завершить UI выбора четырёх встроенных каталогов в Telegram-боте;
-- унифицировать `/search` и `/send-book` под `uid`, а не только Telegram ID;
-- подключить PocketBook-клиент;
-- подключить Flutter-клиент;
-- добавить тесты API, локального поиска, импортёров и custom OPDS;
-- добавить Allure/CI после стабилизации функциональности;
-- улучшить мониторинг ночного обновления каталогов;
-- при реальной необходимости добавить OPDS 2.0.
-
----
-
-## Состояние проекта
-
-BookFerry уже вышел за рамки простого «прокси к OPDS».
-
-Сейчас это backend с локальным полнотекстовым индексом, несколькими источниками данных, пользовательскими профилями, доставкой EPUB, персональными OPDS-каталогами и безопасной фоновой пересборкой метаданных.
+- сервер хранит метаданные, а не постоянную коллекцию EPUB;
+- встроенный поиск должен оставаться локальным;
+- пользовательские данные отделены от перестраиваемого книжного индекса;
+- custom OPDS является недоверенным внешним вводом;
+- большой импорт никогда не пишет непосредственно в рабочий `catalog.db`;
+- клиентские особенности не должны дублировать backend API без необходимости;
+- compatibility endpoints сохраняются только там, где они нужны существующему клиенту.

@@ -77,6 +77,15 @@ def _create_users(cursor):
         row[1]
         for row in cursor.execute("PRAGMA table_info(users)").fetchall()
     }
+
+    if "custom_opds_url" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN custom_opds_url TEXT")
+
+    if "custom_opds_search_template" not in columns:
+        cursor.execute(
+            "ALTER TABLE users ADD COLUMN custom_opds_search_template TEXT"
+        )
+
     if "last_seen_at" not in columns:
         cursor.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
 

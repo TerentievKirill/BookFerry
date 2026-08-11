@@ -1,12 +1,11 @@
 import logging
-import os
 import sqlite3
+import time
 from urllib.parse import quote
 
 import requests
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import FileResponse, PlainTextResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from app.db.catalogs import get_catalog, get_catalogs
 from app.db.users import (
@@ -37,7 +36,11 @@ from app.models import (
     TelegramUser,
     User,
 )
-from app.services.download import download_book, remove_book
+from app.services.download import (
+    download_book,
+    iter_book_stream,
+    open_book_stream,
+)
 from app.services.local_search import search_local_catalog
 from app.services.mail import send_file
 from app.services.opds import inspect_opds, search_opds
@@ -213,12 +216,103 @@ def _search_result(
     return SearchResponse(books=books, next_page_url=next_page_url)
 
 
+def _stream_pocketbook_download(request: Request, identity: dict, url: str):
+    started = time.perf_counter()
+
+    try:
+        upstream, filename = open_book_stream(url)
+    except requests.RequestException as error:
+        log_event(
+            logger,
+            request,
+            "DOWNLOAD_ERROR",
+            level=logging.WARNING,
+            **identity,
+            url=url,
+            error=str(error),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Не удалось скачать книгу: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    headers = {
+        "Content-Disposition": (
+            "attachment; filename*=UTF-8''"
+            f"{quote(filename, safe='')}"
+        ),
+    }
+
+    content_length = upstream.headers.get("Content-Length")
+    if (
+        content_length
+        and content_length.isdigit()
+        and not upstream.headers.get("Content-Encoding")
+    ):
+        headers["Content-Length"] = content_length
+
+    open_ms = (time.perf_counter() - started) * 1000
+    log_event(
+        logger,
+        request,
+        "DOWNLOAD_STREAM_READY",
+        **identity,
+        filename=filename,
+        content_length=content_length,
+        upstream_open_ms=round(open_ms, 1),
+    )
+
+    def body():
+        transferred = 0
+        try:
+            for chunk in iter_book_stream(upstream):
+                transferred += len(chunk)
+                yield chunk
+
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log_event(
+                logger,
+                request,
+                "DOWNLOAD_RESULT",
+                **identity,
+                filename=filename,
+                bytes=transferred,
+                duration_ms=round(elapsed_ms, 1),
+                result="success",
+            )
+        except Exception as error:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log_event(
+                logger,
+                request,
+                "DOWNLOAD_ERROR",
+                level=logging.ERROR,
+                **identity,
+                filename=filename,
+                bytes=transferred,
+                duration_ms=round(elapsed_ms, 1),
+                error=str(error),
+            )
+            raise
+
+    return StreamingResponse(
+        body(),
+        media_type="application/epub+zip",
+        headers=headers,
+    )
+
+
 def _download_result(request: Request, user, url: str):
     identity = _log_identity(user)
     log_event(logger, request, "DOWNLOAD", **identity, url=url)
 
+    if user["client_type"] == "pocketbook":
+        return _stream_pocketbook_download(request, identity, url)
+
     try:
-        path = download_book(url)
+        content, filename = download_book(url)
     except requests.RequestException as error:
         log_event(
             logger,
@@ -244,26 +338,34 @@ def _download_result(request: Request, user, url: str):
 
     try:
         for email in emails:
-            send_file(recipient_email=email, file_path=path)
+            send_file(
+                recipient_email=email,
+                file_content=content,
+                filename=filename,
+                subject=user["subject"],
+            )
 
         log_event(
             logger,
             request,
             "DOWNLOAD_RESULT",
             **identity,
-            filename=os.path.basename(path),
+            filename=filename,
             email_count=len(emails),
             result="success",
         )
 
-        return FileResponse(
-            path=path,
-            filename=os.path.basename(path),
+        return Response(
+            content=content,
             media_type="application/epub+zip",
-            background=BackgroundTask(remove_book, path),
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''"
+                    f"{quote(filename, safe='')}"
+                )
+            },
         )
     except Exception as error:
-        remove_book(path)
         log_event(
             logger,
             request,
@@ -309,6 +411,53 @@ def download_get(
 ):
     user = _resolve_user(telegram_id=telegram_id, uid=uid)
     return _download_result(request, user, url)
+
+
+@router.get("/download/client-result", response_class=PlainTextResponse)
+def download_client_result(
+    request: Request,
+    uid: str = Query(..., min_length=1, max_length=64),
+    status: str = Query(..., min_length=1, max_length=16),
+    bytes_received: int = Query(0, alias="bytes", ge=0),
+    attempts: int = Query(1, ge=1, le=5),
+    duration_ms: int = Query(0, ge=0),
+    http_status: int = Query(0),
+    net_status: int = Query(0),
+    title: str | None = Query(None, max_length=300),
+    error: str | None = Query(None, max_length=200),
+):
+    user = _resolve_user(uid=uid)
+
+    if user["client_type"] != "pocketbook":
+        raise HTTPException(
+            status_code=400,
+            detail="Результат загрузки принимается только от PocketBook",
+        )
+
+    result = status.strip().lower()
+    if result not in {"success", "error"}:
+        raise HTTPException(
+            status_code=400,
+            detail="status должен быть success или error",
+        )
+
+    log_event(
+        logger,
+        request,
+        "DOWNLOAD_CLIENT_RESULT",
+        level=logging.INFO if result == "success" else logging.WARNING,
+        **_log_identity(user),
+        result=result,
+        title=title or "-",
+        bytes=bytes_received,
+        attempts=attempts,
+        duration_ms=duration_ms,
+        http_status=http_status,
+        net_status=net_status,
+        error=error or "-",
+    )
+
+    return PlainTextResponse("OK\n")
 
 
 @router.post("/send-book")
