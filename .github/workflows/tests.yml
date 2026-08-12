@@ -38,14 +38,7 @@ jobs:
             -e CATALOG_DB_NAME=/app/tests/data/catalog_test.db \
             bookferry-test
 
-      - name: Wait for BookFerry
-        run: |
-          curl \
-            --fail \
-            --retry 20 \
-            --retry-delay 1 \
-            --retry-connrefused \
-            http://127.0.0.1:8000/health
+          sleep 2
 
       - name: Run tests
         run: pytest tests -v
