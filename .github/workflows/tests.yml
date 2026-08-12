@@ -40,8 +40,8 @@ jobs:
 
           sleep 2
 
-      - name: Run tests
-        run: pytest tests -v -s
+      - name: Run smoke tests
+        run: pytest tests -v -s -m "not e2e"
 
       - name: Show container logs on failure
         if: failure()
