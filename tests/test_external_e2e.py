@@ -6,8 +6,8 @@ from tests.framework.models import SearchResponse
 CATALOG_CASES = [
     pytest.param(
         1,
-        "alice",
-        "Alice's Adventures in Wonderland",
+        "alice adams",
+        "Alice Adams",
         id="gutenberg",
     ),
     pytest.param(
