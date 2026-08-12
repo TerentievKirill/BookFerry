@@ -1,12 +1,7 @@
-from pathlib import Path
-
 import pytest
 
 from tests.framework.api import BookFerryApi
 from tests.framework.flows import BookFerryFlow
-
-
-TEST_DB_PATH = Path(__file__).parent / "data" / "bookferry_test.db"
 
 
 pytest_plugins = [
@@ -20,11 +15,6 @@ def pytest_addoption(parser):
         default="http://127.0.0.1:8000",
         help="BookFerry API base URL",
     )
-
-
-@pytest.fixture(scope="session")
-def test_db_path() -> Path:
-    return TEST_DB_PATH
 
 
 @pytest.fixture(scope="session")
