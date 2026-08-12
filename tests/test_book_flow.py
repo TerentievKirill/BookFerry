@@ -6,7 +6,7 @@ def test_pocketbook_user_can_find_book(flow):
 
     book = flow.find_first_book(
         uid=user.uid,
-        query="анекдот",
+        query="Лабиринт отражений",
     )
 
     assert book.title
