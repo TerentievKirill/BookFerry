@@ -1,0 +1,44 @@
+name: External E2E
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  external-e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build BookFerry
+        run: docker build -t bookferry-test .
+
+      - name: Start BookFerry
+        run: |
+          docker run -d \
+            --name bookferry-test \
+            -p 8000:8000 \
+            -e DB_NAME=/app/tests/data/bookferry_test.db \
+            -e CATALOG_DB_NAME=/app/tests/data/catalog_test.db \
+            bookferry-test
+
+          sleep 2
+
+      - name: Run external E2E tests
+        run: pytest tests/test_external_e2e.py -v -s -m e2e
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs bookferry-test

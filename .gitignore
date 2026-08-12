@@ -3,14 +3,13 @@ build/
 .idea/
 
 *.o
-*.app
+
 
 compile_commands.json
 CMakeCache.txt
 CMakeFiles/
 
 *.log
-Шпаргалка.md
 .venv/
 __pycache__/
 .git/

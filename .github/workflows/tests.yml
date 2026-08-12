@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - testing
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build BookFerry
+        run: docker build -t bookferry-test .
+
+      - name: Start BookFerry
+        run: |
+          docker run -d \
+            --name bookferry-test \
+            -p 8000:8000 \
+            -e DB_NAME=/app/tests/data/bookferry_test.db \
+            -e CATALOG_DB_NAME=/app/tests/data/catalog_test.db \
+            bookferry-test
+
+          sleep 2
+
+      - name: Run smoke tests
+        run: pytest tests -v -s -m "not e2e"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs bookferry-test
