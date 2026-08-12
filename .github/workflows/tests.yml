@@ -41,7 +41,7 @@ jobs:
           sleep 2
 
       - name: Run tests
-        run: pytest tests -v
+        run: pytest tests -v -s
 
       - name: Show container logs on failure
         if: failure()
