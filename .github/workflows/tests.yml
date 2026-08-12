@@ -35,7 +35,7 @@ jobs:
             --name bookferry-test \
             -p 8000:8000 \
             -e DB_NAME=/app/tests/data/bookferry_test.db \
-            -e CATALOG_DB_NAME=/app/tests/data/bookferry_test.db \
+            -e CATALOG_DB_NAME=/app/tests/data/catalog_test.db \
             bookferry-test
 
       - name: Wait for BookFerry
