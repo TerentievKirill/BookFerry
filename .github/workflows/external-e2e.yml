@@ -5,9 +5,6 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   external-e2e:
     runs-on: ubuntu-latest
@@ -22,16 +19,8 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          npm install -g allure-commandline
+        run: pip install -r requirements.txt
 
       - name: Build BookFerry
         run: docker build -t bookferry-test .
@@ -47,53 +36,17 @@ jobs:
 
           sleep 2
 
-      - name: Run smoke tests
-        id: smoke
-        continue-on-error: true
-        run: pytest tests -v -s -m "not e2e" --alluredir=allure-results
-
       - name: Run external E2E tests
-        id: e2e
-        continue-on-error: true
         run: pytest tests/test_external_e2e.py -v -s -m e2e --alluredir=allure-results
 
-      - name: Restore Allure history
+      - name: Upload Allure results
         if: always()
-        run: |
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages || true
-          if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
-            mkdir -p previous-report
-            git archive origin/gh-pages | tar -x -C previous-report
-            if [ -d previous-report/history ]; then
-              cp -r previous-report/history allure-results/history
-            fi
-          fi
-
-      - name: Generate Allure report
-        if: always()
-        run: |
-          allure generate allure-results --clean -o allure-report
-          touch allure-report/.nojekyll
-
-      - name: Publish Allure report
-        if: always()
-        run: |
-          cp -a allure-report /tmp/allure-report
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --orphan gh-pages-build
-          git rm -rf . || true
-          git clean -fdx
-          cp -a /tmp/allure-report/. .
-          git add -A
-          git commit -m "update Allure report"
-          git push --force origin HEAD:gh-pages
+        uses: actions/upload-artifact@v4
+        with:
+          name: bookferry-e2e-allure-results
+          path: allure-results
+          retention-days: 30
 
       - name: Show container logs on failure
-        if: steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
+        if: failure()
         run: docker logs bookferry-test
-
-      - name: Fail workflow if tests failed
-        if: steps.smoke.outcome == 'failure' || steps.e2e.outcome == 'failure'
-        run: exit 1
