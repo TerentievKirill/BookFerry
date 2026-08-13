@@ -1,5 +1,7 @@
+import logging
 import smtplib
 from email.message import EmailMessage
+from threading import Thread
 
 from app.config import (
     DEFAULT_SUBJECT,
@@ -8,6 +10,9 @@ from app.config import (
     SMTP_PASSWORD,
     SMTP_PORT,
 )
+
+
+logger = logging.getLogger("bookferry.mail")
 
 
 def send_file(
@@ -28,7 +33,18 @@ def send_file(
         filename=filename,
     )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_LOGIN, SMTP_PASSWORD)
-        server.send_message(msg)
+    def deliver():
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_LOGIN, SMTP_PASSWORD)
+                server.send_message(msg)
+        except Exception as error:
+            logger.error(
+                "EMAIL_SEND_ERROR recipient=%r filename=%r error=%r",
+                recipient_email,
+                filename,
+                error,
+            )
+
+    Thread(target=deliver, daemon=True).start()
