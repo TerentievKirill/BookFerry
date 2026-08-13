@@ -41,7 +41,15 @@ jobs:
           sleep 2
 
       - name: Run smoke tests
-        run: pytest tests -v -s -m "not e2e"
+        run: pytest tests -v -s -m "not e2e" --alluredir=allure-results
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bookferry-smoke-allure-results
+          path: allure-results
+          retention-days: 30
 
       - name: Show container logs on failure
         if: failure()
