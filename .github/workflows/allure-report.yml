@@ -105,3 +105,12 @@ jobs:
           EOF
 
           npx allure generate allure-results
+
+      - name: Update latest Allure report on VPS
+        if: always()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: /opt/allure-storage/publish_latest.sh
