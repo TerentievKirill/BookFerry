@@ -112,5 +112,5 @@ jobs:
 
           rsync -az --delete \
             -e "ssh -i ~/.ssh/allure_key" \
-            allure-report/awesome/ \
+            allure-report/ \
             "$ALLURE_USER@$ALLURE_HOST:/var/www/allure/"
