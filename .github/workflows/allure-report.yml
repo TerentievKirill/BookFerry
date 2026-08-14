@@ -11,6 +11,7 @@ jobs:
       BOT_TOKEN: test-token
       API_BASE_URL: https://api.heartlab.app
       TEST_TELEGRAM_ID: "0"
+      ALLURE_ACCESS_TOKEN: ${{ secrets.ALLURE_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout BookFerry
@@ -59,6 +60,7 @@ jobs:
           set +e
 
           cd "$GITHUB_WORKSPACE/backend"
+
           pytest tests -v -s -m "not e2e" \
             --alluredir="$GITHUB_WORKSPACE/allure-results"
           BACKEND_SMOKE=$?
@@ -68,49 +70,38 @@ jobs:
           BACKEND_E2E=$?
 
           cd "$GITHUB_WORKSPACE/bot"
+
           pytest tests/test_external_e2e.py -v -s -m e2e \
             --alluredir="$GITHUB_WORKSPACE/allure-results"
           BOT_E2E=$?
 
-          if [ "$BACKEND_SMOKE" -ne 0 ] || [ "$BACKEND_E2E" -ne 0 ] || [ "$BOT_E2E" -ne 0 ]; then
+          if [ "$BACKEND_SMOKE" -ne 0 ] || \
+             [ "$BACKEND_E2E" -ne 0 ] || \
+             [ "$BOT_E2E" -ne 0 ]; then
             exit 1
           fi
 
-      - name: Generate Allure report
+      - name: Generate and publish Allure report
         if: always()
         run: |
           cat > allurerc.mjs <<'EOF'
           import { defineConfig } from "allure";
+          import { env } from "node:process";
 
           export default defineConfig({
             name: "BookFerry",
-            output: "./allure-report",
             plugins: {
               awesome: {
                 options: {
                   reportLanguage: "ru",
+                  publish: true,
                 },
               },
+            },
+            allureService: {
+              accessToken: env.ALLURE_ACCESS_TOKEN,
             },
           });
           EOF
 
           npx allure generate allure-results
-
-      - name: Deploy Allure report
-        if: always()
-        env:
-          ALLURE_HOST: ${{ secrets.ALLURE_HOST }}
-          ALLURE_USER: ${{ secrets.ALLURE_USER }}
-          ALLURE_SSH_KEY: ${{ secrets.ALLURE_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$ALLURE_SSH_KEY" > ~/.ssh/allure_key
-          chmod 600 ~/.ssh/allure_key
-
-          ssh-keyscan -H "$ALLURE_HOST" >> ~/.ssh/known_hosts
-
-          rsync -az --delete \
-            -e "ssh -i ~/.ssh/allure_key" \
-            allure-report/ \
-            "$ALLURE_USER@$ALLURE_HOST:/var/www/allure/"
