@@ -72,47 +72,45 @@ jobs:
             --alluredir="$GITHUB_WORKSPACE/allure-results"
           BOT_E2E=$?
 
-          echo "Backend smoke: $BACKEND_SMOKE"
-          echo "Backend E2E:   $BACKEND_E2E"
-          echo "Bot E2E:       $BOT_E2E"
-
           if [ "$BACKEND_SMOKE" -ne 0 ] || [ "$BACKEND_E2E" -ne 0 ] || [ "$BOT_E2E" -ne 0 ]; then
             exit 1
           fi
 
-      - name: Publish Allure report
+      - name: Generate Allure report
         if: always()
-        env:
-          ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
         run: |
           cat > allurerc.mjs <<'EOF'
           import { defineConfig } from "allure";
 
           export default defineConfig({
             name: "BookFerry",
+            output: "./allure-report",
             plugins: {
               awesome: {
                 options: {
-                  publish: true,
+                  reportLanguage: "ru",
                 },
               },
-            },
-            allureService: {
-              accessToken: process.env.ALLURE_TOKEN,
             },
           });
           EOF
 
           npx allure generate allure-results
 
-      - name: Upload combined Allure results
+      - name: Deploy Allure report
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bookferry-allure-results
-          path: allure-results
-          retention-days: 30
+        env:
+          ALLURE_HOST: ${{ secrets.ALLURE_HOST }}
+          ALLURE_USER: ${{ secrets.ALLURE_USER }}
+          ALLURE_SSH_KEY: ${{ secrets.ALLURE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ALLURE_SSH_KEY" > ~/.ssh/allure_key
+          chmod 600 ~/.ssh/allure_key
 
-      - name: Show container logs on failure
-        if: failure()
-        run: docker logs bookferry-test
+          ssh-keyscan -H "$ALLURE_HOST" >> ~/.ssh/known_hosts
+
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/allure_key" \
+            allure-report/awesome/ \
+            "$ALLURE_USER@$ALLURE_HOST:/var/www/allure/"
