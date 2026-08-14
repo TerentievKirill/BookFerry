@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt -r bot/requirements.txt
 
+      - name: Install Allure 3
+        run: npm install --no-save allure@3.14.3
+
       - name: Build BookFerry
         run: docker build -t bookferry-test ./backend
 
@@ -76,6 +79,31 @@ jobs:
           if [ "$BACKEND_SMOKE" -ne 0 ] || [ "$BACKEND_E2E" -ne 0 ] || [ "$BOT_E2E" -ne 0 ]; then
             exit 1
           fi
+
+      - name: Publish Allure report
+        if: always()
+        env:
+          ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
+        run: |
+          cat > allurerc.mjs <<'EOF'
+          import { defineConfig } from "allure";
+
+          export default defineConfig({
+            name: "BookFerry",
+            plugins: {
+              awesome: {
+                options: {
+                  publish: true,
+                },
+              },
+            },
+            allureService: {
+              accessToken: process.env.ALLURE_TOKEN,
+            },
+          });
+          EOF
+
+          npx allure generate allure-results
 
       - name: Upload combined Allure results
         if: always()
