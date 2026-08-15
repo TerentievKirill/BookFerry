@@ -63,11 +63,11 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/backend"
 
-          pytest tests -v -s -m "not e2e" \
+          pytest tests/smoke -v -s -m "not e2e" \
             --alluredir="$GITHUB_WORKSPACE/allure-results"
           BACKEND_SMOKE=$?
 
-          pytest tests/test_external_e2e.py -v -s -m e2e \
+          pytest tests/e2e/test_external_e2e.py -v -s -m e2e \
             --alluredir="$GITHUB_WORKSPACE/allure-results"
           BACKEND_E2E=$?
 
