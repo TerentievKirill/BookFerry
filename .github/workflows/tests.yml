@@ -41,7 +41,7 @@ jobs:
           sleep 2
 
       - name: Run smoke tests
-        run: pytest tests -v -s -m "not e2e" --alluredir=allure-results
+        run: pytest tests/smoke -v -s -m "not e2e" --alluredir=allure-results
 
       - name: Upload Allure results
         if: always()

@@ -35,7 +35,7 @@ jobs:
           sleep 2
 
       - name: Run external E2E tests
-        run: pytest tests/test_external_e2e.py -v -s -m e2e --alluredir=allure-results
+        run: pytest tests//e2e/test_external_e2e.py -v -s -m e2e --alluredir=allure-results
 
       - name: Upload Allure results
         if: always()
