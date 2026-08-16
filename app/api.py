@@ -68,11 +68,12 @@ def _email_count(value: str | None) -> int:
 def _active_catalog(catalog_id: int):
     catalog = get_catalog(catalog_id)
     if catalog is None or not catalog["enabled"]:
-        raise HTTPException(status_code=404, detail="Активный каталог не найден")
+        raise HTTPException(status_code=404, detail="Active catalog not found")
     return catalog
 
 
 def _catalog_by_base_url(opds_url: str):
+    # Ignore "/" when matching catalog URLs.
     normalized = opds_url.strip().rstrip("/")
     return next(
         (
@@ -90,7 +91,7 @@ def _inspect_custom_opds(opds_url: str) -> tuple[str, str]:
     except requests.RequestException as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Не удалось открыть OPDS: {error}",
+            detail=f"Failed to open OPDS: {error}",
         ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -101,16 +102,17 @@ def _resolve_user(
     telegram_id: int | None = None,
     uid: str | None = None,
 ):
+    # Either telegram_id or the application uid must be specified
     if (telegram_id is None) == (uid is None):
         raise HTTPException(
             status_code=400,
-            detail="Нужно передать telegram_id или uid",
+            detail="telegram_id or uid must be provided",
         )
 
     user = get_user(telegram_id) if telegram_id is not None else get_user_by_uid(uid)
     if user is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
+        raise HTTPException(status_code=404, detail="User not found")
+    # Update user activity timestamp for statistics.
     touch_user(user["uid"])
     return user
 
@@ -126,6 +128,7 @@ def _log_identity(user) -> dict:
 
 
 def _search_for_user(user, query: str, page_url: str | None):
+    # Search user-provided OPDS sources that are not indexed locally.
     if user["custom_opds_url"]:
         books, next_page_url = search_opds(
             url=user["custom_opds_url"],
@@ -135,6 +138,7 @@ def _search_for_user(user, query: str, page_url: str | None):
         )
         return books, next_page_url, "custom_opds", user["custom_opds_url"]
 
+    # Built-in catalogs use the local search index.
     catalog = _active_catalog(user["catalog_id"])
     books, next_page_url = search_local_catalog(
         catalog_code=catalog["code"],
@@ -152,6 +156,7 @@ def _search_result(
     page_url: str | None,
     plain: bool,
 ):
+    # creation of data for logs
     identity = _log_identity(user)
     log_event(
         logger,
@@ -164,6 +169,7 @@ def _search_result(
 
     source = "unknown"
     try:
+        # Starting the search
         books, next_page_url, source, source_url = _search_for_user(
             user,
             query,
@@ -182,11 +188,11 @@ def _search_result(
         )
         raise HTTPException(
             status_code=502,
-            detail=f"OPDS-каталог недоступен: {error}",
+            detail=f"OPDS catalog is unavailable {error}",
         ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-
+    # detailed search results in logs
     log_event(
         logger,
         request,
@@ -200,6 +206,7 @@ def _search_result(
         sample=_books_sample(books),
     )
 
+    # Plain text response is easier to parse on PocketBook app; Flutter may reuse it later.
     if plain:
         lines = [f"COUNT\t{len(books)}"]
         for book in books:
@@ -217,6 +224,7 @@ def _search_result(
 
 
 def _stream_pocketbook_download(request: Request, identity: dict, url: str):
+    # Stream books directly to PocketBook app without loading the whole file into memory.
     started = time.perf_counter()
 
     try:
@@ -233,7 +241,7 @@ def _stream_pocketbook_download(request: Request, identity: dict, url: str):
         )
         raise HTTPException(
             status_code=502,
-            detail=f"Не удалось скачать книгу: {error}",
+            detail=f"Failed to download the book: {error}",
         ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -265,6 +273,7 @@ def _stream_pocketbook_download(request: Request, identity: dict, url: str):
     )
 
     def body():
+        # Stream chunks to the client while tracking transferred bytes for logs.
         transferred = 0
         try:
             for chunk in iter_book_stream(upstream):
@@ -308,6 +317,7 @@ def _download_result(request: Request, user, url: str):
     identity = _log_identity(user)
     log_event(logger, request, "DOWNLOAD", **identity, url=url)
 
+    # PocketBook app uses streaming; other clients need the full file for email delivery.
     if user["client_type"] == "pocketbook":
         return _stream_pocketbook_download(request, identity, url)
 
@@ -325,7 +335,7 @@ def _download_result(request: Request, user, url: str):
         )
         raise HTTPException(
             status_code=502,
-            detail=f"Не удалось скачать книгу: {error}",
+            detail=f"Failed to download the book: {error}",
         ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -391,13 +401,14 @@ def search_get(
     uid: str | None = None,
     plain: bool = False,
 ):
+    """ Main search endpoint for all current and future clients."""
     user = _resolve_user(telegram_id=telegram_id, uid=uid)
     return _search_result(request, user, query.strip(), page_url, plain)
 
 
 @router.post("/search", response_model=SearchResponse)
 def search_post(data: SearchRequest, request: Request):
-    """Compatibility for the current Telegram bot. New clients use GET /search."""
+    """Legacy endpoint kept for compatibility with the Telegram bot."""
     user = _resolve_user(telegram_id=data.telegram_id)
     return _search_result(request, user, data.query.strip(), data.page_url, False)
 
@@ -409,6 +420,7 @@ def download_get(
     telegram_id: int | None = None,
     uid: str | None = None,
 ):
+    """ Main download endpoint for all clients."""
     user = _resolve_user(telegram_id=telegram_id, uid=uid)
     return _download_result(request, user, url)
 
@@ -426,19 +438,20 @@ def download_client_result(
     title: str | None = Query(None, max_length=300),
     error: str | None = Query(None, max_length=200),
 ):
+    """# PocketBook reports the final download result for delivery tracking and debugging."""
     user = _resolve_user(uid=uid)
 
     if user["client_type"] != "pocketbook":
         raise HTTPException(
             status_code=400,
-            detail="Результат загрузки принимается только от PocketBook",
+            detail="Download results are accepted only from PocketBook.",
         )
 
     result = status.strip().lower()
     if result not in {"success", "error"}:
         raise HTTPException(
             status_code=400,
-            detail="status должен быть success или error",
+            detail="The status must be 'success' or 'error'.",
         )
 
     log_event(
@@ -462,7 +475,7 @@ def download_client_result(
 
 @router.post("/send-book")
 def send_book_post(data: SendBookRequest, request: Request):
-    """Compatibility for the current Telegram bot. New clients use GET /download."""
+    """Legacy endpoint kept for compatibility with the Telegram bot."""
     user = _resolve_user(telegram_id=data.telegram_id)
     return _download_result(request, user, data.url)
 
@@ -471,7 +484,7 @@ def send_book_post(data: SendBookRequest, request: Request):
 def get_telegram_user(telegram_id: int, request: Request):
     user = get_user(telegram_id)
     if user is None:
-        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+        raise HTTPException(status_code=404, detail="Telegram user not found")
 
     touch_user(user["uid"])
     log_event(logger, request, "PROFILE_READ", telegram_id=telegram_id, result="success")
@@ -492,6 +505,7 @@ def set_telegram_user_opds(
     request: Request,
     opds_url: str = Body(..., embed=True),
 ):
+    # Telegram users are created lazily on the first settings update.
     if get_user(telegram_id) is None:
         create_user(telegram_id)
 
@@ -511,7 +525,7 @@ def set_telegram_user_opds(
         opds_url=final_url,
         search_template=search_template,
     ):
-        raise HTTPException(status_code=500, detail="Не удалось сохранить OPDS")
+        raise HTTPException(status_code=500, detail="Failed to save OPDS")
 
     return {"status": "ok", "mode": "custom", "opds_url": final_url}
 
@@ -522,6 +536,7 @@ def set_telegram_user_catalog(
     data: CatalogUpdate,
     request: Request,
 ):
+    # Telegram users are created lazily on the first settings update.
     if get_user(telegram_id) is None:
         create_user(telegram_id)
 
@@ -549,11 +564,11 @@ def set_telegram_user_emails(
     emails: str = Body(..., embed=True),
 ):
     if get_user(telegram_id) is None:
-        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+        raise HTTPException(status_code=404, detail="Telegram user not found")
 
     normalized = emails.strip()
     if not update_email(telegram_id=telegram_id, emails=normalized):
-        raise HTTPException(status_code=500, detail="Не удалось сохранить email")
+        raise HTTPException(status_code=500, detail="Failed to save the email.")
 
     log_event(
         logger,
@@ -571,9 +586,10 @@ def set_telegram_user_subject(
     request: Request,
     subject: str | None = Body(default=None, embed=True),
 ):
+    # Empty value clears the custom subject.
     normalized = subject.strip() if subject else None
     if not update_subject(telegram_id=telegram_id, subject=normalized):
-        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+        raise HTTPException(status_code=404, detail="Telegram user not found")
 
     log_event(
         logger,
@@ -593,19 +609,20 @@ def list_catalogs(plain: bool = False):
             f"CATALOG\t{catalog['id']}\t{quote(catalog['name'], safe='')}"
             for catalog in catalogs
         ]
-        lines.append(f"CUSTOM\t{quote('Другой OPDS', safe='')}")
+        lines.append(f"CUSTOM\t{quote('Custom OPDS', safe='')}")
         return PlainTextResponse("\n".join(lines) + "\n")
     return catalogs
 
 
 @router.post("/users/register", response_model=User, status_code=201)
 def create_generic_user(data: RegisterUserRequest, request: Request):
+    # Main registration endpoint for API clients.
     try:
         user = register_user(data.client_type, data.external_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except sqlite3.IntegrityError as error:
-        raise HTTPException(status_code=409, detail="Пользователь уже существует") from error
+        raise HTTPException(status_code=409, detail="The user already exists.") from error
 
     log_event(
         logger,
@@ -625,6 +642,7 @@ def create_generic_user_get(
     external_id: str | None = None,
     plain: bool = False,
 ):
+    """Simplified GET registration for PocketBook; supports its plain text protocol."""
     try:
         user = register_user(client_type, external_id)
     except ValueError as error:
@@ -654,15 +672,16 @@ def create_generic_user_get(
 def get_generic_user(uid: str, request: Request, plain: bool = False):
     user = get_user_by_uid(uid)
     if user is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     touch_user(uid)
     log_event(logger, request, "PROFILE_READ", uid=uid, result="success")
 
+    # Plain text profile response for the PocketBook client.
     if plain:
         if user["custom_opds_url"]:
             mode = "custom"
-            name = "Другой OPDS"
+            name = "Custom OPDS"
             source_url = user["custom_opds_url"]
         else:
             catalog = _active_catalog(user["catalog_id"])
@@ -684,7 +703,7 @@ def get_generic_user(uid: str, request: Request, plain: bool = False):
 @router.patch("/users/{uid}/catalog")
 def set_user_catalog(uid: str, data: CatalogUpdate, request: Request):
     if get_user_by_uid(uid) is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     catalog = _active_catalog(data.catalog_id)
     update_user_catalog(uid, catalog["id"])
@@ -703,8 +722,9 @@ def set_user_catalog_get(
     request: Request,
     plain: bool = False,
 ):
+    """GET variant for the PocketBook client."""
     if get_user_by_uid(uid) is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     catalog = _active_catalog(catalog_id)
     update_user_catalog(uid, catalog["id"])
@@ -733,12 +753,13 @@ def set_user_opds_get(
     opds_url: str,
     plain: bool = False,
 ):
+    """GET variant for the PocketBook client."""
     return _set_user_opds(uid, opds_url, request, plain)
 
 
 def _set_user_opds(uid: str, opds_url: str, request: Request, plain: bool):
     if get_user_by_uid(uid) is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     builtin = _catalog_by_base_url(opds_url)
     if builtin is not None:
@@ -760,7 +781,7 @@ def _set_user_opds(uid: str, opds_url: str, request: Request, plain: bool):
         opds_url=final_url,
         search_template=search_template,
     ):
-        raise HTTPException(status_code=500, detail="Не удалось сохранить OPDS")
+        raise HTTPException(status_code=500, detail="Failed to save OPDS")
 
     log_event(logger, request, "CUSTOM_OPDS_CHANGED", uid=uid, opds_url=final_url)
     if plain:
@@ -772,7 +793,7 @@ def _set_user_opds(uid: str, opds_url: str, request: Request, plain: bool):
 def set_user_emails(uid: str, data: EmailsUpdate, request: Request):
     normalized = data.emails.strip()
     if not update_user_emails(uid, normalized):
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     log_event(
         logger,
@@ -788,7 +809,7 @@ def set_user_emails(uid: str, data: EmailsUpdate, request: Request):
 def set_user_subject(uid: str, data: SubjectUpdate, request: Request):
     subject = data.subject.strip() if data.subject else None
     if not update_user_subject(uid, subject):
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+        raise HTTPException(status_code=404, detail="User not found")
 
     log_event(
         logger,
