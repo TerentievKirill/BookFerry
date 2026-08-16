@@ -331,17 +331,6 @@ docker compose logs -f bookferry
 
 Полный импорт Flibusta и других источников предназначен для production и может занимать значительное время.
 
-## PocketBook smoke test
-
-После запуска backend можно проверить основной PocketBook flow:
-
-```bash
-python scripts/smoke_pocketbook.py \
-  --base-url http://127.0.0.1:8000 \
-  --query "лабиринт отражений"
-```
-
-Сценарий проверяет регистрацию, получение каталогов, выбор каталога, поиск и загрузку EPUB.
 
 ## Тестирование
 
