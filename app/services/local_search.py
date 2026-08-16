@@ -1,152 +1,742 @@
-import re
-from urllib.parse import urlparse
+import logging
+import time
+from urllib.parse import quote
 
-from app.db.catalog_database import get_catalog_connection
-from app.models import Book
+import requests
+from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+
+from app.db.catalogs import get_catalog, get_catalogs
+from app.db.users import (
+    create_user,
+    get_user,
+    get_user_by_uid,
+    register_user,
+    touch_user,
+    update_email,
+    update_subject,
+    update_telegram_catalog,
+    update_telegram_custom_opds,
+    update_user_catalog,
+    update_user_custom_opds,
+)
+from app.logging_config import log_event
+from app.models import (
+    CatalogUpdate,
+    SearchRequest,
+    SearchResponse,
+    SendBookRequest,
+    TelegramUser,
+    User,
+)
+from app.services.download import (
+    download_book,
+    iter_book_stream,
+    open_book_stream,
+)
+from app.services.local_search import search_local_catalog
+from app.services.mail import send_file
+from app.services.opds import inspect_opds, search_opds
 
 
-PAGE_SIZE = 20
-_PAGE_TOKEN_PREFIX = "local:"
+router = APIRouter()
+logger = logging.getLogger("bookferry.api")
 
 
-def _page_offset(page_token: str | None) -> int:
-    if page_token is None:
+def _books_sample(books, limit: int = 5) -> str:
+    if not books:
+        return "-"
+    return " | ".join(
+        f"{book.title} — {book.author or '-'}"
+        for book in books[:limit]
+    )
+
+
+def _email_count(value: str | None) -> int:
+    if not value:
         return 0
+    return len([item for item in value.split(",") if item.strip()])
 
-    if not page_token.startswith(_PAGE_TOKEN_PREFIX):
-        raise ValueError("Некорректная страница поиска")
 
-    raw_offset = page_token[len(_PAGE_TOKEN_PREFIX):]
+def _active_catalog(catalog_id: int):
+    catalog = get_catalog(catalog_id)
+    if catalog is None or not catalog["enabled"]:
+        raise HTTPException(status_code=404, detail="Active catalog not found")
+    return catalog
+
+
+def _catalog_by_base_url(opds_url: str):
+    # Ignore "/" when matching catalog URLs.
+    normalized = opds_url.strip().rstrip("/")
+    return next(
+        (
+            item
+            for item in get_catalogs()
+            if item["base_url"].strip().rstrip("/") == normalized
+        ),
+        None,
+    )
+
+
+def _inspect_custom_opds(opds_url: str) -> tuple[str, str]:
+    try:
+        return inspect_opds(opds_url)
+    except requests.RequestException as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to open OPDS: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _resolve_user(
+    *,
+    telegram_id: int | None = None,
+    uid: str | None = None,
+):
+    # Either telegram_id or the application uid must be specified
+    if (telegram_id is None) == (uid is None):
+        raise HTTPException(
+            status_code=400,
+            detail="telegram_id or uid must be provided",
+        )
+
+    user = get_user(telegram_id) if telegram_id is not None else get_user_by_uid(uid)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Update user activity timestamp for statistics.
+    touch_user(user["uid"])
+    return user
+
+
+def _log_identity(user) -> dict:
+    fields = {
+        "uid": user["uid"],
+        "client_type": user["client_type"],
+    }
+    if user["client_type"] == "telegram" and user["external_id"]:
+        fields["telegram_id"] = user["external_id"]
+    return fields
+
+
+def _search_for_user(user, query: str, page_url: str | None):
+    # Search user-provided OPDS sources that are not indexed locally.
+    if user["custom_opds_url"]:
+        books, next_page_url = search_opds(
+            url=user["custom_opds_url"],
+            query=query,
+            page_url=page_url,
+            search_template=user["custom_opds_search_template"],
+        )
+        return books, next_page_url, "custom_opds", user["custom_opds_url"]
+
+    # Built-in catalogs use the local search index.
+    catalog = _active_catalog(user["catalog_id"])
+    books, next_page_url = search_local_catalog(
+        catalog_code=catalog["code"],
+        base_url=catalog["base_url"],
+        query=query,
+        page_token=page_url,
+    )
+    return books, next_page_url, catalog["code"], catalog["base_url"]
+
+
+def _search_result(
+    request: Request,
+    user,
+    query: str,
+    page_url: str | None,
+    plain: bool,
+):
+    # creation of data for logs
+    identity = _log_identity(user)
+    log_event(
+        logger,
+        request,
+        "SEARCH",
+        **identity,
+        query=query,
+        page=page_url or "first",
+    )
+
+    source = "unknown"
+    try:
+        # Starting the search
+        books, next_page_url, source, source_url = _search_for_user(
+            user,
+            query,
+            page_url,
+        )
+    except requests.RequestException as error:
+        log_event(
+            logger,
+            request,
+            "SEARCH_ERROR",
+            level=logging.WARNING,
+            **identity,
+            source=source,
+            query=query,
+            error=str(error),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"OPDS catalog is unavailable {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    # detailed search results in logs
+    log_event(
+        logger,
+        request,
+        "SEARCH_RESULT",
+        **identity,
+        source=source,
+        source_url=source_url,
+        query=query,
+        found=len(books),
+        next_page=next_page_url,
+        sample=_books_sample(books),
+    )
+
+    # Plain text response is easier to parse on PocketBook app; Flutter may reuse it later.
+    if plain:
+        lines = [f"COUNT\t{len(books)}"]
+        for book in books:
+            lines.append(
+                "BOOK\t"
+                f"{quote(book.title or '', safe='')}\t"
+                f"{quote(book.author or '', safe='')}\t"
+                f"{quote(book.url, safe='')}"
+            )
+        if next_page_url:
+            lines.append(f"NEXT\t{quote(next_page_url, safe='')}")
+        return PlainTextResponse("\n".join(lines) + "\n")
+
+    return SearchResponse(books=books, next_page_url=next_page_url)
+
+
+def _stream_pocketbook_download(request: Request, identity: dict, url: str):
+    # Stream books directly to PocketBook app without loading the whole file into memory.
+    started = time.perf_counter()
 
     try:
-        offset = int(raw_offset)
-    except ValueError as error:
-        raise ValueError("Некорректная страница поиска") from error
-
-    if offset < 0 or offset % PAGE_SIZE != 0:
-        raise ValueError("Некорректная страница поиска")
-
-    return offset
-
-
-def _fts_query(query: str) -> str | None:
-    words = [
-        word.strip("_")
-        for word in re.findall(r"\w+", query, flags=re.UNICODE)
-    ]
-    words = [word for word in words if word]
-
-    if not words:
-        return None
-
-    return " AND ".join(
-        f'"{word.replace(chr(34), chr(34) * 2)}"*'
-        for word in words
-    )
-
-
-def _origin(base_url: str) -> tuple[str, str]:
-    parsed = urlparse(base_url)
-
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Некорректный адрес каталога")
-
-    return parsed.scheme, parsed.netloc
-
-
-def _flibusta_epub_url(base_url: str, external_id: str) -> str:
-    scheme, netloc = _origin(base_url)
-    return f"{scheme}://{netloc}/b/{external_id}/epub"
-
-
-def _gutenberg_epub_url(base_url: str, external_id: str) -> str:
-    if not external_id.isdigit():
-        raise ValueError("Некорректный ID Project Gutenberg")
-
-    scheme, netloc = _origin(base_url)
-    return f"{scheme}://{netloc}/ebooks/{external_id}.epub3.images"
-
-
-def _anarchist_epub_url(base_url: str, external_id: str) -> str:
-    scheme, netloc = _origin(base_url)
-
-    if "/" in external_id or not external_id:
-        raise ValueError("Некорректный ID AmuseWiki")
-
-    return f"{scheme}://{netloc}/library/{external_id}.epub"
-
-
-def _download_url(
-    catalog_code: str,
-    base_url: str,
-    external_id: str,
-) -> str:
-    if catalog_code == "flibusta":
-        return _flibusta_epub_url(base_url, external_id)
-
-    if catalog_code == "gutenberg":
-        return _gutenberg_epub_url(base_url, external_id)
-
-    if catalog_code in {"anarchist", "anarchist_ru"}:
-        return _anarchist_epub_url(base_url, external_id)
-
-    raise ValueError(f"Скачивание из каталога {catalog_code} пока не поддерживается")
-
-
-def search_local_catalog(
-    catalog_code: str,
-    base_url: str,
-    query: str,
-    page_token: str | None = None,
-) -> tuple[list[Book], str | None]:
-    offset = _page_offset(page_token)
-    match_query = _fts_query(query)
-
-    if match_query is None:
-        return [], None
-
-    with get_catalog_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                books.external_id,
-                books.title,
-                COALESCE(books.author, '') AS author
-            FROM books_fts
-            JOIN books ON books.id = books_fts.rowid
-            WHERE books_fts MATCH ?
-              AND books.catalog_code = ?
-            ORDER BY bm25(books_fts), books.title COLLATE NOCASE
-            LIMIT ? OFFSET ?
-            """,
-            (
-                match_query,
-                catalog_code,
-                PAGE_SIZE + 1,
-                offset,
-            ),
-        ).fetchall()
-
-    has_more = len(rows) > PAGE_SIZE
-    rows = rows[:PAGE_SIZE]
-
-    books = [
-        Book(
-            author=row["author"],
-            title=row["title"],
-            url=_download_url(
-                catalog_code=catalog_code,
-                base_url=base_url,
-                external_id=row["external_id"],
-            ),
+        upstream, filename = open_book_stream(url)
+    except requests.RequestException as error:
+        log_event(
+            logger,
+            request,
+            "DOWNLOAD_ERROR",
+            level=logging.WARNING,
+            **identity,
+            url=url,
+            error=str(error),
         )
-        for row in rows
-    ]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to download the book: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
-    next_page_token = (
-        f"{_PAGE_TOKEN_PREFIX}{offset + PAGE_SIZE}"
-        if has_more
-        else None
+    headers = {
+        "Content-Disposition": (
+            "attachment; filename*=UTF-8''"
+            f"{quote(filename, safe='')}"
+        ),
+    }
+
+    content_length = upstream.headers.get("Content-Length")
+    if (
+        content_length
+        and content_length.isdigit()
+        and not upstream.headers.get("Content-Encoding")
+    ):
+        headers["Content-Length"] = content_length
+
+    open_ms = (time.perf_counter() - started) * 1000
+    log_event(
+        logger,
+        request,
+        "DOWNLOAD_STREAM_READY",
+        **identity,
+        filename=filename,
+        content_length=content_length,
+        upstream_open_ms=round(open_ms, 1),
     )
 
-    return books, next_page_token
+    def body():
+        # Stream chunks to the client while tracking transferred bytes for logs.
+        transferred = 0
+        try:
+            for chunk in iter_book_stream(upstream):
+                transferred += len(chunk)
+                yield chunk
+
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log_event(
+                logger,
+                request,
+                "DOWNLOAD_RESULT",
+                **identity,
+                filename=filename,
+                bytes=transferred,
+                duration_ms=round(elapsed_ms, 1),
+                result="success",
+            )
+        except Exception as error:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            log_event(
+                logger,
+                request,
+                "DOWNLOAD_ERROR",
+                level=logging.ERROR,
+                **identity,
+                filename=filename,
+                bytes=transferred,
+                duration_ms=round(elapsed_ms, 1),
+                error=str(error),
+            )
+            raise
+
+    return StreamingResponse(
+        body(),
+        media_type="application/epub+zip",
+        headers=headers,
+    )
+
+
+def _download_result(request: Request, user, url: str):
+    identity = _log_identity(user)
+    log_event(logger, request, "DOWNLOAD", **identity, url=url)
+
+    # PocketBook app uses streaming; other clients need the full file for email delivery.
+    if user["client_type"] == "pocketbook":
+        return _stream_pocketbook_download(request, identity, url)
+
+    try:
+        content, filename = download_book(url)
+    except requests.RequestException as error:
+        log_event(
+            logger,
+            request,
+            "DOWNLOAD_ERROR",
+            level=logging.WARNING,
+            **identity,
+            url=url,
+            error=str(error),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to download the book: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    emails = [
+        email.strip()
+        for email in (user["emails"] or "").split(",")
+        if email.strip()
+    ]
+
+    try:
+        for email in emails:
+            send_file(
+                recipient_email=email,
+                file_content=content,
+                filename=filename,
+                subject=user["subject"],
+            )
+
+        log_event(
+            logger,
+            request,
+            "DOWNLOAD_RESULT",
+            **identity,
+            filename=filename,
+            email_count=len(emails),
+            result="success",
+        )
+
+        return Response(
+            content=content,
+            media_type="application/epub+zip",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''"
+                    f"{quote(filename, safe='')}"
+                )
+            },
+        )
+    except Exception as error:
+        log_event(
+            logger,
+            request,
+            "DOWNLOAD_ERROR",
+            level=logging.ERROR,
+            **identity,
+            error=str(error),
+        )
+        raise
+
+
+@router.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@router.get("/search")
+def search_get(
+    request: Request,
+    query: str = Query(min_length=1, max_length=256),
+    page_url: str | None = None,
+    telegram_id: int | None = None,
+    uid: str | None = None,
+    plain: bool = False,
+):
+    """ Main search endpoint for all current and future clients."""
+    user = _resolve_user(telegram_id=telegram_id, uid=uid)
+    return _search_result(request, user, query.strip(), page_url, plain)
+
+
+@router.post("/search", response_model=SearchResponse)
+def search_post(data: SearchRequest, request: Request):
+    """Legacy endpoint kept for compatibility with the Telegram bot."""
+    user = _resolve_user(telegram_id=data.telegram_id)
+    return _search_result(request, user, data.query.strip(), data.page_url, False)
+
+
+@router.get("/download")
+def download_get(
+    request: Request,
+    url: str,
+    telegram_id: int | None = None,
+    uid: str | None = None,
+):
+    """ Main download endpoint for all clients."""
+    user = _resolve_user(telegram_id=telegram_id, uid=uid)
+    return _download_result(request, user, url)
+
+
+@router.get("/download/client-result", response_class=PlainTextResponse)
+def download_client_result(
+    request: Request,
+    uid: str = Query(..., min_length=1, max_length=64),
+    status: str = Query(..., min_length=1, max_length=16),
+    bytes_received: int = Query(0, alias="bytes", ge=0),
+    attempts: int = Query(1, ge=1, le=5),
+    duration_ms: int = Query(0, ge=0),
+    http_status: int = Query(0),
+    net_status: int = Query(0),
+    title: str | None = Query(None, max_length=300),
+    error: str | None = Query(None, max_length=200),
+):
+    """# PocketBook reports the final download result for delivery tracking and debugging."""
+    user = _resolve_user(uid=uid)
+
+    if user["client_type"] != "pocketbook":
+        raise HTTPException(
+            status_code=400,
+            detail="Download results are accepted only from PocketBook.",
+        )
+
+    result = status.strip().lower()
+    if result not in {"success", "error"}:
+        raise HTTPException(
+            status_code=400,
+            detail="The status must be 'success' or 'error'.",
+        )
+
+    log_event(
+        logger,
+        request,
+        "DOWNLOAD_CLIENT_RESULT",
+        level=logging.INFO if result == "success" else logging.WARNING,
+        **_log_identity(user),
+        result=result,
+        title=title or "-",
+        bytes=bytes_received,
+        attempts=attempts,
+        duration_ms=duration_ms,
+        http_status=http_status,
+        net_status=net_status,
+        error=error or "-",
+    )
+
+    return PlainTextResponse("OK\n")
+
+
+@router.post("/send-book")
+def send_book_post(data: SendBookRequest, request: Request):
+    """Legacy endpoint kept for compatibility with the Telegram bot."""
+    user = _resolve_user(telegram_id=data.telegram_id)
+    return _download_result(request, user, data.url)
+
+
+@router.get("/users/telegram/{telegram_id}", response_model=TelegramUser)
+def get_telegram_user(telegram_id: int, request: Request):
+    user = get_user(telegram_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Telegram user not found")
+
+    touch_user(user["uid"])
+    log_event(logger, request, "PROFILE_READ", telegram_id=telegram_id, result="success")
+    return TelegramUser(
+        id=user["id"],
+        uid=user["uid"],
+        telegram_id=int(user["external_id"]),
+        catalog_id=user["catalog_id"],
+        opds_url=user["opds_url"],
+        emails=user["emails"],
+        subject=user["subject"],
+    )
+
+
+@router.patch("/users/telegram/{telegram_id}/opds")
+def set_telegram_user_opds(
+    telegram_id: int,
+    request: Request,
+    opds_url: str = Body(..., embed=True),
+):
+    # Telegram users are created lazily on the first settings update.
+    if get_user(telegram_id) is None:
+        create_user(telegram_id)
+
+    builtin = _catalog_by_base_url(opds_url)
+    if builtin is not None:
+        update_telegram_catalog(telegram_id, builtin["id"])
+        return {
+            "status": "ok",
+            "mode": "catalog",
+            "catalog_id": builtin["id"],
+            "opds_url": builtin["base_url"],
+        }
+
+    final_url, search_template = _inspect_custom_opds(opds_url.strip())
+    if not update_telegram_custom_opds(
+        telegram_id=telegram_id,
+        opds_url=final_url,
+        search_template=search_template,
+    ):
+        raise HTTPException(status_code=500, detail="Failed to save OPDS")
+
+    return {"status": "ok", "mode": "custom", "opds_url": final_url}
+
+
+@router.patch("/users/telegram/{telegram_id}/catalog")
+def set_telegram_user_catalog(
+    telegram_id: int,
+    data: CatalogUpdate,
+    request: Request,
+):
+    # Telegram users are created lazily on the first settings update.
+    if get_user(telegram_id) is None:
+        create_user(telegram_id)
+
+    catalog = _active_catalog(data.catalog_id)
+    update_telegram_catalog(telegram_id, catalog["id"])
+    log_event(
+        logger,
+        request,
+        "CATALOG_CHANGED",
+        telegram_id=telegram_id,
+        catalog_id=catalog["id"],
+        catalog_code=catalog["code"],
+    )
+    return {
+        "status": "ok",
+        "catalog_id": catalog["id"],
+        "opds_url": catalog["base_url"],
+    }
+
+
+@router.patch("/users/telegram/{telegram_id}/emails")
+def set_telegram_user_emails(
+    telegram_id: int,
+    request: Request,
+    emails: str = Body(..., embed=True),
+):
+    if get_user(telegram_id) is None:
+        raise HTTPException(status_code=404, detail="Telegram user not found")
+
+    normalized = emails.strip()
+    if not update_email(telegram_id=telegram_id, emails=normalized):
+        raise HTTPException(status_code=500, detail="Failed to save the email.")
+
+    log_event(
+        logger,
+        request,
+        "EMAILS_CHANGED",
+        telegram_id=telegram_id,
+        email_count=_email_count(normalized),
+    )
+    return {"status": "ok", "emails": normalized}
+
+
+@router.patch("/users/telegram/{telegram_id}/subject")
+def set_telegram_user_subject(
+    telegram_id: int,
+    request: Request,
+    subject: str | None = Body(default=None, embed=True),
+):
+    # Empty value clears the custom subject.
+    normalized = subject.strip() if subject else None
+    if not update_subject(telegram_id=telegram_id, subject=normalized):
+        raise HTTPException(status_code=404, detail="Telegram user not found")
+
+    log_event(
+        logger,
+        request,
+        "SUBJECT_CHANGED",
+        telegram_id=telegram_id,
+        action="set" if normalized else "cleared",
+    )
+    return {"status": "ok", "subject": normalized}
+
+
+@router.get("/catalogs")
+def list_catalogs(plain: bool = False):
+    catalogs = [dict(catalog) for catalog in get_catalogs() if catalog["enabled"]]
+    if plain:
+        lines = [
+            f"CATALOG\t{catalog['id']}\t{quote(catalog['name'], safe='')}"
+            for catalog in catalogs
+        ]
+        lines.append(f"CUSTOM\t{quote('Custom OPDS', safe='')}")
+        return PlainTextResponse("\n".join(lines) + "\n")
+    return catalogs
+
+
+@router.get("/users/register")
+def create_generic_user_get(
+    request: Request,
+    client_type: str,
+    external_id: str | None = None,
+    plain: bool = False,
+):
+    """Simplified GET registration for PocketBook; supports its plain text protocol."""
+    try:
+        user = register_user(client_type, external_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    catalog = _active_catalog(user["catalog_id"])
+    log_event(
+        logger,
+        request,
+        "USER_REGISTERED",
+        uid=user["uid"],
+        client_type=client_type,
+        external_id=external_id,
+    )
+
+    if plain:
+        return PlainTextResponse(
+            "UID\t"
+            f"{user['uid']}\t"
+            f"{catalog['id']}\t"
+            f"{quote(catalog['name'], safe='')}\n"
+        )
+    return User(**dict(user))
+
+
+@router.get("/users/{uid}", response_model=None)
+def get_generic_user(uid: str, request: Request, plain: bool = False):
+    user = get_user_by_uid(uid)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    touch_user(uid)
+    log_event(logger, request, "PROFILE_READ", uid=uid, result="success")
+
+    # Plain text profile response for the PocketBook client.
+    if plain:
+        if user["custom_opds_url"]:
+            mode = "custom"
+            name = "Custom OPDS"
+            source_url = user["custom_opds_url"]
+        else:
+            catalog = _active_catalog(user["catalog_id"])
+            mode = "catalog"
+            name = catalog["name"]
+            source_url = catalog["base_url"]
+
+        return PlainTextResponse(
+            "PROFILE\t"
+            f"{user['catalog_id']}\t"
+            f"{quote(name, safe='')}\t"
+            f"{mode}\t"
+            f"{quote(source_url, safe='')}\n"
+        )
+
+    return User(**dict(user))
+
+
+@router.get("/users/{uid}/catalog")
+def set_user_catalog_get(
+    uid: str,
+    catalog_id: int,
+    request: Request,
+    plain: bool = False,
+):
+    """GET variant for the PocketBook client."""
+    if get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    catalog = _active_catalog(catalog_id)
+    update_user_catalog(uid, catalog["id"])
+    log_event(logger, request, "CATALOG_CHANGED", uid=uid, catalog_id=catalog["id"])
+
+    if plain:
+        return PlainTextResponse(
+            f"OK\t{catalog['id']}\t{quote(catalog['name'], safe='')}\n"
+        )
+    return {
+        "status": "ok",
+        "catalog_id": catalog["id"],
+        "opds_url": catalog["base_url"],
+    }
+
+
+@router.get("/users/{uid}/opds")
+def set_user_opds_get(
+    uid: str,
+    request: Request,
+    opds_url: str,
+    plain: bool = False,
+):
+    """GET variant for the PocketBook client."""
+    return _set_user_opds(uid, opds_url, request, plain)
+
+
+def _set_user_opds(uid: str, opds_url: str, request: Request, plain: bool):
+    if get_user_by_uid(uid) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    builtin = _catalog_by_base_url(opds_url)
+    if builtin is not None:
+        update_user_catalog(uid, builtin["id"])
+        if plain:
+            return PlainTextResponse(
+                f"OK\t{builtin['id']}\t{quote(builtin['name'], safe='')}\n"
+            )
+        return {
+            "status": "ok",
+            "mode": "catalog",
+            "catalog_id": builtin["id"],
+            "opds_url": builtin["base_url"],
+        }
+
+    final_url, search_template = _inspect_custom_opds(opds_url.strip())
+    if not update_user_custom_opds(
+        uid=uid,
+        opds_url=final_url,
+        search_template=search_template,
+    ):
+        raise HTTPException(status_code=500, detail="Failed to save OPDS")
+
+    log_event(logger, request, "CUSTOM_OPDS_CHANGED", uid=uid, opds_url=final_url)
+    if plain:
+        return PlainTextResponse(f"OK\t0\t{quote('Custom OPDS', safe='')}\n")
+    return {"status": "ok", "mode": "custom", "opds_url": final_url}
+
