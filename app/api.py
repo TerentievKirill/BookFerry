@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 import time
 from urllib.parse import quote
 
@@ -20,19 +19,13 @@ from app.db.users import (
     update_telegram_custom_opds,
     update_user_catalog,
     update_user_custom_opds,
-    update_user_emails,
-    update_user_subject,
 )
 from app.logging_config import log_event
 from app.models import (
     CatalogUpdate,
-    EmailsUpdate,
-    OpdsUpdate,
-    RegisterUserRequest,
     SearchRequest,
     SearchResponse,
     SendBookRequest,
-    SubjectUpdate,
     TelegramUser,
     User,
 )
@@ -614,27 +607,6 @@ def list_catalogs(plain: bool = False):
     return catalogs
 
 
-@router.post("/users/register", response_model=User, status_code=201)
-def create_generic_user(data: RegisterUserRequest, request: Request):
-    # Main registration endpoint for API clients.
-    try:
-        user = register_user(data.client_type, data.external_id)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except sqlite3.IntegrityError as error:
-        raise HTTPException(status_code=409, detail="The user already exists.") from error
-
-    log_event(
-        logger,
-        request,
-        "USER_REGISTERED",
-        uid=user["uid"],
-        client_type=data.client_type,
-        external_id=data.external_id,
-    )
-    return User(**dict(user))
-
-
 @router.get("/users/register")
 def create_generic_user_get(
     request: Request,
@@ -700,21 +672,6 @@ def get_generic_user(uid: str, request: Request, plain: bool = False):
     return User(**dict(user))
 
 
-@router.patch("/users/{uid}/catalog")
-def set_user_catalog(uid: str, data: CatalogUpdate, request: Request):
-    if get_user_by_uid(uid) is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    catalog = _active_catalog(data.catalog_id)
-    update_user_catalog(uid, catalog["id"])
-    log_event(logger, request, "CATALOG_CHANGED", uid=uid, catalog_id=catalog["id"])
-    return {
-        "status": "ok",
-        "catalog_id": catalog["id"],
-        "opds_url": catalog["base_url"],
-    }
-
-
 @router.get("/users/{uid}/catalog")
 def set_user_catalog_get(
     uid: str,
@@ -739,11 +696,6 @@ def set_user_catalog_get(
         "catalog_id": catalog["id"],
         "opds_url": catalog["base_url"],
     }
-
-
-@router.patch("/users/{uid}/opds")
-def set_user_opds(uid: str, data: OpdsUpdate, request: Request):
-    return _set_user_opds(uid, data.opds_url, request, False)
 
 
 @router.get("/users/{uid}/opds")
@@ -788,34 +740,3 @@ def _set_user_opds(uid: str, opds_url: str, request: Request, plain: bool):
         return PlainTextResponse(f"OK\t0\t{quote('Другой OPDS', safe='')}\n")
     return {"status": "ok", "mode": "custom", "opds_url": final_url}
 
-
-@router.patch("/users/{uid}/emails")
-def set_user_emails(uid: str, data: EmailsUpdate, request: Request):
-    normalized = data.emails.strip()
-    if not update_user_emails(uid, normalized):
-        raise HTTPException(status_code=404, detail="User not found")
-
-    log_event(
-        logger,
-        request,
-        "EMAILS_CHANGED",
-        uid=uid,
-        email_count=_email_count(normalized),
-    )
-    return {"status": "ok", "emails": normalized}
-
-
-@router.patch("/users/{uid}/subject")
-def set_user_subject(uid: str, data: SubjectUpdate, request: Request):
-    subject = data.subject.strip() if data.subject else None
-    if not update_user_subject(uid, subject):
-        raise HTTPException(status_code=404, detail="User not found")
-
-    log_event(
-        logger,
-        request,
-        "SUBJECT_CHANGED",
-        uid=uid,
-        action="set" if subject else "cleared",
-    )
-    return {"status": "ok", "subject": subject}
