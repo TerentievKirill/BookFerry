@@ -20,7 +20,7 @@ def send_file(
     file_content: bytes,
     filename: str,
     subject: str | None = None,
-):
+) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject or DEFAULT_SUBJECT
     msg["From"] = SMTP_LOGIN
@@ -47,4 +47,6 @@ def send_file(
                 error,
             )
 
+    # Email is sent in the background, so delivery errors are logged
+    # instead of being returned to the API request.
     Thread(target=deliver, daemon=True).start()
