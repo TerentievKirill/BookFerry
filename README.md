@@ -85,9 +85,11 @@ PocketBook умеет:
 - скачивать EPUB в `/mnt/ext1/Books`;
 - вручную запускать обновление библиотеки ридера.
 
-Для простого C-клиента те же API могут отдавать компактный текстовый формат через `plain=1`.
+Для простого C-клиента API может отдавать компактный текстовый формат через `plain=1`.
 
 Скачивание для PocketBook работает потоково: backend начинает передавать EPUB клиенту сразу после получения ответа от источника, не дожидаясь полной загрузки файла на сервер.
+
+После завершения загрузки PocketBook отдельно сообщает backend итог операции через `/download/client-result`. Это позволяет отличить успешную отдачу `StreamingResponse` на сервере от реально полученного клиентом файла.
 
 Дополнительные детали — в [pocketbook/README.md](pocketbook/README.md).
 
@@ -188,28 +190,35 @@ The Anarchist Library >= 10 000
 
 FastAPI автоматически публикует Swagger UI в `/docs`.
 
-Основные общие ручки:
+Основные ручки текущего PocketBook API:
 
 | Метод | Endpoint | Назначение |
 |---|---|---|
 | `GET` | `/health` | health check |
 | `GET` | `/catalogs` | список каталогов |
-| `POST` / `GET` | `/users/register` | регистрация клиента |
+| `GET` | `/users/register` | регистрация устройства и получение `uid` |
 | `GET` | `/users/{uid}` | профиль |
-| `PATCH` / `GET` | `/users/{uid}/catalog` | выбор каталога |
-| `PATCH` / `GET` | `/users/{uid}/opds` | custom OPDS |
-| `PATCH` | `/users/{uid}/emails` | e-mail пользователя |
-| `PATCH` | `/users/{uid}/subject` | тема письма |
-| `GET` | `/search` | общий поиск по `uid` или `telegram_id` |
-| `GET` | `/download` | общее скачивание по `uid` или `telegram_id` |
+| `GET` | `/users/{uid}/catalog` | выбор встроенного каталога |
+| `GET` | `/users/{uid}/opds` | выбор custom OPDS |
+| `GET` | `/search` | поиск книг по `uid` |
+| `GET` | `/download` | потоковая загрузка EPUB по `uid` |
+| `GET` | `/download/client-result` | итог загрузки со стороны PocketBook |
 
-Для совместимости с текущим Telegram-ботом также сохранены:
+Для PocketBook часть этих endpoint'ов поддерживает `plain=1`, чтобы клиенту на C не приходилось разбирать JSON.
+
+Для совместимости с текущим Telegram-ботом отдельно сохранены:
 
 ```text
 POST /search
 POST /send-book
-GET/PATCH /users/telegram/{telegram_id}/...
+GET   /users/telegram/{telegram_id}
+PATCH /users/telegram/{telegram_id}/catalog
+PATCH /users/telegram/{telegram_id}/opds
+PATCH /users/telegram/{telegram_id}/emails
+PATCH /users/telegram/{telegram_id}/subject
 ```
+
+Telegram compatibility layer использует ту же backend-логику поиска и скачивания, но сохраняет старый контракт уже работающего бота.
 
 ## Логирование
 
@@ -269,6 +278,11 @@ BookFerry/
 │   ├── import_anarchist_ru.py
 │   ├── update_all_catalogs.py
 │   └── smoke_pocketbook.py
+├── tests/
+│   ├── fixtures/
+│   ├── framework/
+│   ├── smoke/
+│   └── e2e/
 ├── deploy/
 │   ├── bookferry-catalog-update.service
 │   └── bookferry-catalog-update.timer
@@ -331,7 +345,27 @@ python scripts/smoke_pocketbook.py \
 
 ## Тестирование
 
-Сейчас в репозитории есть end-to-end smoke для PocketBook API. Полный pytest/CI regression suite ещё не добавлен и является следующим техническим этапом проекта.
+В репозитории есть небольшой pytest API framework, deterministic smoke suite и отдельные external E2E tests.
+
+Smoke запускается на каждый push / pull request:
+
+```bash
+pytest tests -v -m "not e2e"
+```
+
+External E2E проверяет реальные источники книг и может запускаться отдельно:
+
+```bash
+pytest tests/e2e -v -s -m e2e
+```
+
+Все тесты:
+
+```bash
+pytest tests -v
+```
+
+Подробная структура и принципы тестового фреймворка описаны в [tests/README_tests.md](tests/README_tests.md).
 
 ## Основные архитектурные принципы
 
