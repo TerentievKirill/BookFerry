@@ -55,15 +55,14 @@ def _find_expected_book(api, uid, query, expected_title):
     "catalog_id,query,expected_title",
     CATALOG_CASES,
 )
-def test_book_can_be_found_in_external_catalog(
+def test_book_can_be_found_in_catalog(
     api,
     flow,
     catalog_id,
     query,
     expected_title,
 ):
-    user = flow.create_configured_user(
-        client_type="pocketbook",
+    user = flow.create_configured_pocketbook_user(
         catalog_id=catalog_id,
     )
 
@@ -82,15 +81,14 @@ def test_book_can_be_found_in_external_catalog(
     "catalog_id,query,expected_title",
     CATALOG_CASES,
 )
-def test_book_can_be_downloaded_from_external_catalog(
+def test_book_can_be_downloaded_from_source(
     api,
     flow,
     catalog_id,
     query,
     expected_title,
 ):
-    user = flow.create_configured_user(
-        client_type="pocketbook",
+    user = flow.create_configured_pocketbook_user(
         catalog_id=catalog_id,
     )
 

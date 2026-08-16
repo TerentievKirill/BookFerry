@@ -1,5 +1,3 @@
-import uuid
-
 import pytest
 
 from tests.framework.models import User
@@ -9,12 +7,16 @@ from tests.framework.models import User
 def pocketbook_user(api) -> User:
     response = api.register_user(
         client_type="pocketbook",
-        external_id=f"autotest-{uuid.uuid4()}",
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 200
 
-    return User.model_validate(response.json())
+    user = User.model_validate(response.json())
+
+    assert user.client_type == "pocketbook"
+    assert user.uid
+
+    return user
 
 
 @pytest.fixture
@@ -23,13 +25,8 @@ def configured_pocketbook_user(api, pocketbook_user) -> User:
         pocketbook_user.uid,
         catalog_id=1,
     )
-    email_response = api.set_emails(
-        pocketbook_user.uid,
-        "autotest@pbsync.com",
-    )
 
     assert catalog_response.status_code == 200
-    assert email_response.status_code == 200
 
     response = api.get_user(pocketbook_user.uid)
 

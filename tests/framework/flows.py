@@ -6,18 +6,12 @@ class BookFerryFlow:
     def __init__(self, api: BookFerryApi):
         self.api = api
 
-    def create_configured_user(
+    def create_configured_pocketbook_user(
         self,
-        client_type: str,
         catalog_id: int,
-        *,
-        external_id: str | None = None,
-        emails: str | None = None,
-        subject: str | None = None,
     ) -> User:
         response = self.api.register_user(
-            client_type=client_type,
-            external_id=external_id,
+            client_type="pocketbook",
         )
         response.raise_for_status()
 
@@ -25,14 +19,6 @@ class BookFerryFlow:
 
         response = self.api.set_catalog(user.uid, catalog_id)
         response.raise_for_status()
-
-        if emails is not None:
-            response = self.api.set_emails(user.uid, emails)
-            response.raise_for_status()
-
-        if subject is not None:
-            response = self.api.set_subject(user.uid, subject)
-            response.raise_for_status()
 
         response = self.api.get_user(user.uid)
         response.raise_for_status()

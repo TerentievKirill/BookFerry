@@ -1,6 +1,5 @@
 def test_pocketbook_user_can_find_book(flow):
-    user = flow.create_configured_user(
-        client_type="pocketbook",
+    user = flow.create_configured_pocketbook_user(
         catalog_id=3,
     )
 

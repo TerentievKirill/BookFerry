@@ -2,63 +2,70 @@
 
 This directory contains a small API automation framework for BookFerry.
 
-The goal of this test suite is not to maximize the number of test cases.  
-It is intentionally small and demonstrates how I usually structure API automation: clear separation between HTTP clients, test data, reusable business flows, response models, and test scenarios.
+The suite is intentionally compact. Its purpose is to test the real BookFerry HTTP contract without building a large framework around a small project.
 
-## Test strategy
+The structure stays simple:
 
-The suite is intentionally split into two layers with different purposes.
+```text
+HTTP client -> fixtures / reusable flows -> test scenarios
+```
+
+Application Pydantic models are not imported into the tests. The test suite has its own response models, so HTTP responses are validated independently.
+
+## What is tested
+
+The server currently has two client paths:
+
+- PocketBook uses the `uid` based GET API;
+- the existing Telegram bot uses compatibility endpoints and is maintained in a separate repository.
+
+This test suite focuses on the BookFerry server and the PocketBook API contract. It does not create a second artificial generic user API only for tests.
 
 ### Smoke tests
 
-The deterministic smoke suite runs on every push and pull request.
+Smoke tests run against deterministic local test databases and do not require external book sources to be available.
 
-Its purpose is to answer a simple question:
+They cover:
+
+- PocketBook registration;
+- rejection of unsupported client types;
+- reading a user profile;
+- changing the PocketBook catalog;
+- handling of an unknown user;
+- book search;
+- response model validation;
+- the basic business flow: register -> select catalog -> search.
+
+The smoke suite is intended to answer one question:
 
 > Did this code change break the basic BookFerry functionality?
 
-The smoke tests cover:
-
-- user registration for supported client types;
-- validation of unsupported client types;
-- user profile updates;
-- handling of unknown users;
-- book search;
-- validation of search response contracts;
-- a complete business flow: create user → configure catalog → search for a book.
-
-Some scenarios are parametrized, so the current smoke suite produces 10 pytest test cases while keeping the number of logical scenarios small.
-
-These tests use deterministic local test data and do not depend on external libraries being available.
-
 ### External E2E tests
 
-External E2E tests verify BookFerry as a complete service, including its real external dependencies.
+External E2E scenarios use the same application but continue past local search and reach the real EPUB source.
 
-They are intentionally separated from the smoke suite because an external library can be temporarily unavailable even when BookFerry itself is healthy.
+There are two parametrized scenarios:
 
-There are two logical E2E scenarios, parametrized by supported library:
-
-1. **Search E2E** — create a user, select a catalog, search for a known book and verify that the expected book is returned.
-2. **Download E2E** — perform the same search, take the returned download URL and actually download the book through BookFerry.
+1. **Search flow** — register a PocketBook user, select a built-in catalog and find a known book in the local BookFerry index.
+2. **Download flow** — perform the same search and download the selected EPUB through BookFerry from the real source.
 
 The download scenario verifies:
 
-- HTTP 200 response;
+- HTTP 200;
 - EPUB content type;
-- non-empty file content;
+- non-empty content;
 - ZIP/EPUB signature (`PK`).
 
-The current parameter set covers the built-in catalogs:
+The current catalog cases are:
 
 - Project Gutenberg;
 - The Anarchist Library;
 - Flibusta;
 - Библиотека Анархизма.
 
-These tests are marked with `@pytest.mark.e2e`.
+External E2E tests are marked with `@pytest.mark.e2e`.
 
-A failure in this suite can therefore mean either a BookFerry regression or a real availability/problem in one of the external services. That is useful information: the purpose of this suite is to verify that the service actually works from the user's point of view.
+A download failure can mean either a BookFerry regression or a real problem with an external source, which is why these scenarios are kept separate from deterministic smoke tests.
 
 ## Structure
 
@@ -76,138 +83,126 @@ tests/
 │   ├── flows.py
 │   └── models.py
 │
-├── conftest.py
-├── test_book_flow.py
-├── test_external_e2e.py
-├── test_search.py
-└── test_users.py
+├── smoke/
+│   ├── test_book_flow.py
+│   ├── test_search.py
+│   └── test_users.py
+│
+├── e2e/
+│   └── test_external_e2e.py
+│
+└── conftest.py
 ```
 
-### `framework/api.py`
+## `framework/api.py`
 
-`BookFerryApi` is a thin HTTP client around the BookFerry API.
+`BookFerryApi` is a thin HTTP wrapper around the current server API.
 
-Each method corresponds to an API operation and returns the original
-`requests.Response`.
+Each method performs one HTTP operation and returns the original `requests.Response`.
 
-Assertions are deliberately kept out of the API layer.
-
-This makes the same client suitable for both positive and negative tests:
+Assertions stay outside this layer:
 
 ```python
 response = api.register_user(
     client_type="pocketbook",
-    external_id="autotest-user",
 )
 
-assert response.status_code == 201
+assert response.status_code == 200
 ```
 
-### `framework/models.py`
+The PocketBook configuration methods use the same GET endpoints as the real client:
 
-The tests have their own Pydantic response models:
+```text
+GET /users/register
+GET /users/{uid}/catalog
+GET /users/{uid}/opds
+GET /search
+GET /download
+```
+
+Tests normally use the JSON representation. The real C client can request the same resources with `plain=1`.
+
+## `framework/models.py`
+
+Tests use their own Pydantic response models:
 
 ```python
 user = User.model_validate(response.json())
 ```
 
-They are intentionally separate from the application models.
+They are intentionally separate from `app.models`.
 
-The tests therefore validate the HTTP contract independently instead of
-reusing the same Python models that generated the response.
+This gives model validation some value as an independent HTTP contract check instead of validating a response with the exact same model that generated it.
 
-This allows model validation to work as an additional API contract check.
-
-### `framework/flows.py`
+## `framework/flows.py`
 
 Flows contain reusable multi-step business scenarios.
 
 For example:
 
 ```text
-register user
-    ↓
+register PocketBook
+        ↓
 select catalog
-    ↓
-read user
-    ↓
+        ↓
+read profile
+        ↓
 search books
 ```
 
-Simple HTTP calls remain in `BookFerryApi`; only actual multi-step scenarios
-belong in the flow layer.
+Simple HTTP requests stay in `BookFerryApi`. Only multi-step scenarios belong in the flow layer.
 
-This keeps tests short without hiding their intent.
-
-### `fixtures/`
-
-Reusable test entities are created through pytest fixtures.
-
-Example:
+The current helper:
 
 ```python
-def test_user_profile_can_be_updated(api, pocketbook_user):
-    ...
+flow.create_configured_pocketbook_user(catalog_id=3)
 ```
 
-Fixtures may depend on other fixtures, which allows more complex test states
-to be composed without duplicating preparation code.
+creates a PocketBook user through the same registration and catalog endpoints used by the actual client.
 
-### `data/`
+## `fixtures/`
+
+Fixtures prepare reusable test state.
+
+`pocketbook_user` creates a new PocketBook user.
+
+`configured_pocketbook_user` additionally selects the deterministic test catalog used by search smoke tests.
+
+E-mail and subject are deliberately not part of PocketBook fixtures: those settings belong to the Telegram delivery flow.
+
+## Test data
 
 Tests use dedicated SQLite databases:
 
 ```text
-bookferry_test.db  — users and available catalogs
+bookferry_test.db  — users and catalog configuration
 catalog_test.db    — searchable book catalog snapshot
 ```
 
-The test suite does not access these databases directly.
+Tests do not access those databases directly.
 
-BookFerry itself receives their paths when the Docker container is started,
-and tests interact with the application only through HTTP.
+BookFerry receives their paths when the test container starts, while pytest interacts with the service only through HTTP.
 
-`bookferry_test.db` provides deterministic user/catalog configuration.
-
-`catalog_test.db` can be a snapshot of the real BookFerry catalog database. This allows search scenarios to use realistic production-like catalog data while keeping the test input reproducible. External E2E download tests then use the real download URLs generated from that catalog data and contact the external libraries through BookFerry.
-
-## Parametrization
-
-Client registration is checked using pytest parametrization:
-
-```python
-@pytest.mark.parametrize(
-    "client_type",
-    [
-        pytest.param("telegram", id="telegram"),
-        pytest.param("pocketbook", id="pocketbook"),
-        pytest.param("flutter", id="flutter"),
-    ],
-)
-```
-
-The same approach is used for external E2E scenarios: one logical search test and one logical download test are executed against multiple supported catalogs.
-
-This keeps the number of test functions small without duplicating scenarios.
+This keeps smoke search deterministic while allowing external E2E download tests to use real source URLs generated by BookFerry.
 
 ## Running locally
 
-BookFerry should be available on:
+BookFerry should be available at:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Run the deterministic smoke suite:
+Run deterministic smoke tests:
 
 ```bash
 pytest tests -v -m "not e2e"
 ```
 
-Run only external E2E tests:
+Run external E2E only:
 
 ```bash
-pytest tests/test_external_e2e.py -v -s -m e2e
+pytest tests/e2e -v -s -m e2e
 ```
 
 Run everything:
@@ -216,7 +211,7 @@ Run everything:
 pytest tests -v
 ```
 
-A different API endpoint can be supplied explicitly:
+Use another server:
 
 ```bash
 pytest tests -v --base-url=http://example:8000
@@ -224,68 +219,59 @@ pytest tests -v --base-url=http://example:8000
 
 ## CI
 
-The project uses two GitHub Actions workflows.
+The project has separate CI jobs for deterministic smoke and external E2E.
 
 ### Smoke CI
 
-The regular `Tests` workflow runs on pushes and pull requests:
+The regular test workflow:
 
 ```text
-checkout repository
-        ↓
+checkout
+   ↓
 install dependencies
-        ↓
+   ↓
 build BookFerry Docker image
-        ↓
+   ↓
 start BookFerry with test databases
-        ↓
-run deterministic smoke tests
+   ↓
+run smoke tests
 ```
 
-Its job is to detect regressions introduced by code changes as quickly and reliably as possible.
+Smoke should fail only when the application or its deterministic test contract is broken.
 
-### Daily External E2E
+### External E2E
 
-The `External E2E` workflow runs once per day and can also be started manually.
+The external workflow can run separately:
 
 ```text
-checkout repository
-        ↓
-build and start BookFerry
-        ↓
-search known books in supported catalogs
-        ↓
-download the books through BookFerry
-        ↓
-verify the real end-to-end result
+start BookFerry
+    ↓
+search known books
+    ↓
+download EPUB from real source
+    ↓
+validate returned file
 ```
 
-This workflow acts as a daily check that BookFerry and its supported external libraries still work together in practice.
+This intentionally checks the boundary between BookFerry and the outside world.
 
-Every GitHub Actions run starts from the committed clean test databases, so test-created users and other changes are automatically discarded together with the CI runner.
-
-No separate shared testing environment or persistent test database is required.
+Every CI run starts from committed test databases, so users created during tests disappear with the runner.
 
 ## Design decisions
 
 The framework is intentionally small.
 
-There is no generic HTTP abstraction hierarchy, repository layer, database
-helper framework, or large collection of utility classes.
+There is no generic repository layer, HTTP abstraction hierarchy or direct database helper in the tests.
 
-For a project of this size they would add more code than value.
-
-The main principles are:
+The main rules are:
 
 - tests describe behavior rather than implementation details;
-- HTTP operations are isolated in the API layer;
-- response contracts are validated independently with Pydantic;
-- reusable preparation lives in fixtures;
-- reusable multi-step scenarios live in flows;
-- smoke test data is deterministic;
-- external E2E tests deliberately verify real dependencies;
-- CI runs the real application in Docker;
-- smoke and E2E tests answer different questions and therefore run on different schedules;
-- each test should demonstrate meaningful behavior rather than increase the test count.
+- the API layer contains HTTP calls, not assertions;
+- response models are independent from application models;
+- reusable state belongs in fixtures;
+- reusable multi-step behavior belongs in flows;
+- smoke data is deterministic;
+- external E2E is separated from smoke;
+- tests follow endpoints used by real clients instead of keeping obsolete API routes alive.
 
-The result is a small test suite that can be understood quickly while still showing the structure used in larger API automation projects.
+The result is a small suite that stays close to the application and is easy to read.

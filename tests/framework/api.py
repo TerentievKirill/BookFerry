@@ -28,13 +28,17 @@ class BookFerryApi:
         client_type: str,
         external_id: str | None = None,
     ) -> requests.Response:
+        params = {
+            "client_type": client_type,
+        }
+
+        if external_id is not None:
+            params["external_id"] = external_id
+
         return self._request(
-            "POST",
+            "GET",
             "/users/register",
-            json={
-                "client_type": client_type,
-                "external_id": external_id,
-            },
+            params=params,
         )
 
     def get_user(self, uid: str) -> requests.Response:
@@ -46,31 +50,20 @@ class BookFerryApi:
         catalog_id: int,
     ) -> requests.Response:
         return self._request(
-            "PATCH",
+            "GET",
             f"/users/{uid}/catalog",
-            json={"catalog_id": catalog_id},
+            params={"catalog_id": catalog_id},
         )
 
-    def set_emails(
+    def set_opds(
         self,
         uid: str,
-        emails: str,
+        opds_url: str,
     ) -> requests.Response:
         return self._request(
-            "PATCH",
-            f"/users/{uid}/emails",
-            json={"emails": emails},
-        )
-
-    def set_subject(
-        self,
-        uid: str,
-        subject: str | None,
-    ) -> requests.Response:
-        return self._request(
-            "PATCH",
-            f"/users/{uid}/subject",
-            json={"subject": subject},
+            "GET",
+            f"/users/{uid}/opds",
+            params={"opds_url": opds_url},
         )
 
     def search(
