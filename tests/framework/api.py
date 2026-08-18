@@ -23,6 +23,7 @@ class BookFerryApi:
     def catalogs(self) -> requests.Response:
         return self._request("GET", "/catalogs")
 
+    #only PB and Flutter (future)
     def register_user(
         self,
         client_type: str,
@@ -128,3 +129,26 @@ class BookFerryApi:
                 "error": error,
             },
         )
+
+
+
+
+
+#only telegramm user (legacy)
+def get_telegram_user(self, telegram_id: int) -> requests.Response:
+    return self._request(
+        "GET",
+        f"/users/telegram/{telegram_id}",
+    )
+
+
+def set_telegram_catalog(
+    self,
+    telegram_id: int,
+    catalog_id: int,
+) -> requests.Response:
+    return self._request(
+        "PATCH",
+        f"/users/telegram/{telegram_id}/catalog",
+        json={"catalog_id": catalog_id},
+    )
