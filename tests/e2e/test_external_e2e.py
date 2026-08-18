@@ -1,3 +1,4 @@
+import allure
 import pytest
 
 from tests.framework.models import SearchResponse
@@ -51,6 +52,8 @@ def _find_expected_book(api, uid, query, expected_title):
 
 
 @pytest.mark.e2e
+@allure.parent_suite("BookFerry")
+@allure.suite("External E2E")
 @pytest.mark.parametrize(
     "catalog_id,query,expected_title",
     CATALOG_CASES,
@@ -77,6 +80,8 @@ def test_book_can_be_found_in_catalog(
 
 
 @pytest.mark.e2e
+@allure.parent_suite("BookFerry")
+@allure.suite("External E2E")
 @pytest.mark.parametrize(
     "catalog_id,query,expected_title",
     CATALOG_CASES,

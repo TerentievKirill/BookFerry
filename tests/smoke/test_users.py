@@ -7,6 +7,8 @@ from tests.framework.models import TelegramUser, User
 
 # Minimal smoke tests for user management. They are intentionally small:
 # the goal is to catch commits that break basic behavior, not to cover every case.
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("PocketBook user can be registered")
 def test_pocketbook_user_can_be_registered(api):
     response = api.register_user(
@@ -22,6 +24,8 @@ def test_pocketbook_user_can_be_registered(api):
     assert user.uid
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("Telegram user can be created")
 def test_telegram_user_can_be_created(api):
     response = api.set_telegram_catalog(
@@ -41,6 +45,8 @@ def test_telegram_user_can_be_created(api):
     assert user.uid
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("Invalid user type is rejected")
 @pytest.mark.parametrize(
     "client_type",
@@ -57,6 +63,8 @@ def test_user_registration_rejects_invalid_client_type(api, client_type):
     assert response.status_code == 400
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("PocketBook catalog can be changed")
 def test_pocketbook_catalog_can_be_changed(api, pocketbook_user):
     uid = pocketbook_user.uid
@@ -74,6 +82,8 @@ def test_pocketbook_catalog_can_be_changed(api, pocketbook_user):
     assert user.catalog_id == 3
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("Telegram catalog can be changed")
 def test_telegram_catalog_can_be_changed(api, telegram_user):
     telegram_id = telegram_user.telegram_id
@@ -91,6 +101,8 @@ def test_telegram_catalog_can_be_changed(api, telegram_user):
     assert user.catalog_id == 3
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("Unknown user returns 404")
 def test_unknown_user_returns_404(api):
     response = api.get_user("unknown-autotest-user")
@@ -98,6 +110,8 @@ def test_unknown_user_returns_404(api):
     assert response.status_code == 404
 
 
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
 @allure.title("Unknown Telegram user returns 404")
 def test_unknown_telegram_user_returns_404(api):
     response = api.get_telegram_user(2147483647)
