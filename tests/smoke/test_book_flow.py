@@ -1,3 +1,6 @@
+from tests.fixtures.users import TELEGRAM_TEST_USER_ID
+
+
 def test_pocketbook_user_can_find_book(flow):
     user = flow.create_configured_pocketbook_user(
         catalog_id=3,
@@ -11,9 +14,10 @@ def test_pocketbook_user_can_find_book(flow):
     assert book.title
     assert book.url
 
+
 def test_telegram_user_can_find_book(flow):
     user = flow.create_configured_telegram_user(
-        telegram_id=0,
+        telegram_id=TELEGRAM_TEST_USER_ID,
         catalog_id=3,
     )
 
