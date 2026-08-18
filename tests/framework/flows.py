@@ -41,3 +41,21 @@ class BookFerryFlow:
             )
 
         return search_result.books[0]
+
+
+    def create_configured_telegram_user(
+        self,
+        telegram_id: int,
+        catalog_id: int,
+    ) -> TelegramUser:
+        # Telegram users are created lazily on the first settings update.
+        response = self.api.set_telegram_catalog(
+            telegram_id,
+            catalog_id,
+        )
+        response.raise_for_status()
+    
+        response = self.api.get_telegram_user(telegram_id)
+        response.raise_for_status()
+    
+        return TelegramUser.model_validate(response.json())
