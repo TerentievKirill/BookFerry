@@ -23,7 +23,7 @@ class BookFerryApi:
     def catalogs(self) -> requests.Response:
         return self._request("GET", "/catalogs")
 
-    #only PB and Flutter (future)
+    # Generic client API used by PocketBook and future native clients.
     def register_user(
         self,
         client_type: str,
@@ -65,6 +65,24 @@ class BookFerryApi:
             "GET",
             f"/users/{uid}/opds",
             params={"opds_url": opds_url},
+        )
+
+    # Telegram keeps legacy endpoints because the bot identifies users by telegram_id.
+    def get_telegram_user(self, telegram_id: int) -> requests.Response:
+        return self._request(
+            "GET",
+            f"/users/telegram/{telegram_id}",
+        )
+
+    def set_telegram_catalog(
+        self,
+        telegram_id: int,
+        catalog_id: int,
+    ) -> requests.Response:
+        return self._request(
+            "PATCH",
+            f"/users/telegram/{telegram_id}/catalog",
+            json={"catalog_id": catalog_id},
         )
 
     def search(
@@ -129,26 +147,3 @@ class BookFerryApi:
                 "error": error,
             },
         )
-
-
-
-
-
-#only telegramm user (legacy)
-def get_telegram_user(self, telegram_id: int) -> requests.Response:
-    return self._request(
-        "GET",
-        f"/users/telegram/{telegram_id}",
-    )
-
-
-def set_telegram_catalog(
-    self,
-    telegram_id: int,
-    catalog_id: int,
-) -> requests.Response:
-    return self._request(
-        "PATCH",
-        f"/users/telegram/{telegram_id}/catalog",
-        json={"catalog_id": catalog_id},
-    )

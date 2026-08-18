@@ -18,6 +18,15 @@ class User(BaseModel):
     subject: str | None = None
 
 
+class TelegramUser(BaseModel):
+    uid: str
+    telegram_id: int
+    catalog_id: int
+    opds_url: str
+    emails: str | None = None
+    subject: str | None = None
+
+
 class Catalog(BaseModel):
     id: int
     code: str

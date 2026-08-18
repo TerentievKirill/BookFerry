@@ -1,6 +1,9 @@
 import pytest
 
-from tests.framework.models import User
+from tests.framework.models import TelegramUser, User
+
+
+TELEGRAM_TEST_USER_ID = 987654321
 
 
 @pytest.fixture
@@ -33,3 +36,24 @@ def configured_pocketbook_user(api, pocketbook_user) -> User:
     assert response.status_code == 200
 
     return User.model_validate(response.json())
+
+
+@pytest.fixture
+def telegram_user(api) -> TelegramUser:
+    response = api.set_telegram_catalog(
+        TELEGRAM_TEST_USER_ID,
+        catalog_id=1,
+    )
+
+    assert response.status_code == 200
+
+    response = api.get_telegram_user(TELEGRAM_TEST_USER_ID)
+
+    assert response.status_code == 200
+
+    user = TelegramUser.model_validate(response.json())
+
+    assert user.telegram_id == TELEGRAM_TEST_USER_ID
+    assert user.uid
+
+    return user
