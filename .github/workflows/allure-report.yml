@@ -97,6 +97,7 @@ jobs:
                 options: {
                   reportLanguage: "ru",
                   publish: true,
+                  groupBy: ["parentSuite", "suite"],
                 },
               },
             },
