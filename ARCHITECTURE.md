@@ -1,26 +1,26 @@
 # BookFerry Architecture
 
-Этот документ описывает текущую архитектуру BookFerry Server и взаимодействие с клиентами.
+Этот документ описывает текущую архитектуру BookFerry Server и взаимодействие с реальными клиентами.
 
-README отвечает на вопрос «что умеет проект и как его запустить». Здесь описано, **почему система устроена именно так и как проходят основные потоки данных**.
+README отвечает на вопрос «что умеет проект и как его запустить». Здесь зафиксированы **границы компонентов, потоки данных и архитектурные решения, которые важно не потерять при дальнейшем развитии**.
 
 ## 1. Цели архитектуры
 
-BookFerry решает три разные задачи:
+BookFerry решает три основные задачи:
 
 1. быстро искать книги;
-2. получать EPUB у внешнего источника только по запросу;
-3. доставлять книгу разным клиентам без дублирования backend-логики.
+2. получать EPUB у внешнего источника только после выбора книги пользователем;
+3. доставлять книгу разным клиентам без дублирования core backend-логики.
 
 Из этого следуют основные принципы:
 
-- метаданные и пользовательские данные хранятся отдельно;
+- метаданные книг и пользовательские данные хранятся отдельно;
 - встроенные каталоги ищутся локально;
 - EPUB-файлы не образуют постоянное серверное хранилище;
-- пользовательский OPDS считается недоверенным внешним вводом;
-- обновление большого книжного индекса не должно повреждать рабочую базу;
-- API по возможности общий для всех клиентов;
-- специфичный формат ответа используется только там, где этого требует простой PocketBook-клиент.
+- custom OPDS и внешние book URL считаются недоверенным вводом;
+- большой индекс обновляется через отдельный snapshot и атомарную замену;
+- общий API и сервисный слой используются всеми клиентами;
+- client-specific контракты остаются тонкими адаптерами на HTTP boundary.
 
 ## 2. Общая схема
 
@@ -29,7 +29,7 @@ flowchart TD
     subgraph Clients
         PB[PocketBook / InkView]
         TG[Telegram Bot]
-        FUTURE[Other clients]
+        FUTURE[Future clients]
     end
 
     PB --> API[FastAPI API]
@@ -58,87 +58,86 @@ flowchart TD
     SOURCE -->|bytes| MAIL[mail.py / SMTP]
 ```
 
-## 3. Компоненты
+## 3. Основные компоненты
 
 ### `main.py`
 
-Минимальная точка входа:
+Минимальный application bootstrap:
 
-- настраивает логирование;
-- инициализирует обе SQLite-базы;
-- создаёт FastAPI;
+- настраивает logging;
+- инициализирует `bookferry.db`;
+- инициализирует схему `catalog.db`;
+- создаёт FastAPI application;
 - подключает request logging middleware;
 - подключает API router.
 
-Бизнес-логика здесь не хранится.
+Бизнес-логики здесь нет.
 
 ### `app/api.py`
 
-HTTP boundary приложения.
+HTTP boundary и orchestration layer.
 
 Отвечает за:
 
-- идентификацию пользователя;
-- выбор нужного search flow;
-- преобразование ошибок сервисов в HTTP ошибки;
-- выбор download flow для конкретного типа клиента;
-- compatibility endpoints;
-- API-level logging.
+- разрешение пользователя по `uid` или `telegram_id`;
+- выбор built-in или custom OPDS search flow;
+- преобразование ошибок сервисов в HTTP errors;
+- выбор streaming или in-memory download flow;
+- PocketBook plain responses;
+- Telegram compatibility endpoints;
+- API-level business logging.
 
 ### `app/services/local_search.py`
 
-Адаптер встроенных каталогов.
+Адаптер локального поиска по встроенным каталогам.
 
 Отвечает за:
 
 - преобразование пользовательского запроса в FTS5 query;
-- локальный поиск по `catalog.db`;
-- пагинацию;
-- построение EPUB URL из `catalog_code` и `external_id`.
+- поиск в `catalog.db`;
+- локальную пагинацию;
+- построение source-specific EPUB URL из `catalog_code`, `base_url` и `external_id`.
 
 ### `app/services/opds.py`
 
-Generic OPDS 1.x / OpenSearch client.
-
-Используется только для персонального custom OPDS.
+Generic OPDS 1.x / Atom / OpenSearch client для персонального custom OPDS.
 
 Отвечает за:
 
-- проверку Atom feed;
+- inspection OPDS feed;
 - обнаружение `rel="search"`;
 - чтение OpenSearch Description;
-- заполнение `{searchTerms}`;
+- подстановку `{searchTerms}`;
 - разбор EPUB acquisition links;
-- OPDS pagination.
+- сетевую OPDS pagination.
 
 ### `app/services/safe_http.py`
 
-Единая точка сетевой защиты для URL, контролируемых пользователем или внешним каталогом.
+Единая точка сетевой защиты для URL, которые приходят от пользователя или внешнего каталога.
 
 Отвечает за:
 
-- проверку схемы;
+- разрешённые схемы;
+- запрет URL credentials;
 - DNS resolution;
-- запрет non-global IP;
-- запрет credentials в URL;
-- ручное прохождение redirect с повторной валидацией каждого адреса.
+- запрет loopback/private/link-local/non-global IP;
+- ручное прохождение redirect;
+- повторную валидацию каждого redirect target.
 
 ### `app/services/download.py`
 
-Скачивание выбранного EPUB.
+Содержит две формы получения EPUB:
 
-Содержит две операции:
+- `download_book()` — полный файл в память;
+- `open_book_stream()` + `iter_book_stream()` — streaming для PocketBook.
 
-- обычная загрузка книги целиком в память;
-- открытие upstream streaming response для PocketBook.
-
-Файл на диск здесь не создаётся.
+Общие временные EPUB-файлы здесь не создаются.
 
 ### `app/services/mail.py`
 
-Формирует письмо с EPUB-вложением и отправляет его через SMTP.
+Получает уже готовые `bytes`, имя файла и параметры письма, формирует EPUB attachment и отправляет его через SMTP.
 
-Получает уже готовые `bytes` и `filename`, поэтому не зависит от временных файлов.
+Сервис не скачивает книги самостоятельно и не зависит от файловой системы.
 
 ## 4. Хранилища данных
 
@@ -155,7 +154,7 @@ users
 catalogs
 ```
 
-Основные поля `users`:
+Ключевые поля `users`:
 
 ```text
 id
@@ -173,15 +172,25 @@ last_seen_at
 
 `uid` — основной client-neutral identifier.
 
-`external_id` используется там, где у внешнего клиента уже есть естественный ID. Для Telegram это Telegram user ID.
+`external_id` используется там, где у клиента уже есть естественный внешний ID. Для Telegram это Telegram user ID.
 
-`last_seen_at` обновляется при пользовательской активности и позволяет отличать реальные активные установки от старых записей.
+Поддерживаемые `client_type`:
+
+```text
+telegram
+pocketbook
+flutter
+```
+
+`flutter` зарезервирован моделью пользователей, но Flutter client в этом репозитории пока не реализован.
+
+`last_seen_at` обновляется при пользовательской активности и используется для статистики активности.
 
 ### 4.2 `catalog.db`
 
-Перестраиваемый индекс метаданных книг.
+Производный перестраиваемый индекс метаданных.
 
-Таблицы:
+Основные таблицы:
 
 ```text
 books
@@ -198,17 +207,30 @@ author
 language
 ```
 
-EPUB URL и сами файлы книг здесь не хранятся.
+EPUB URL и сами EPUB-файлы в базе не хранятся.
 
 ### Почему базы разделены
 
-`bookferry.db` содержит ценное состояние пользователей и не должна заменяться при обновлении книг.
+`bookferry.db` содержит пользовательское состояние, которое нельзя потерять при обновлении каталога.
 
-`catalog.db` является производным индексом. Его можно полностью построить заново из внешних источников.
+`catalog.db` можно полностью восстановить из внешних источников, поэтому он обновляется как disposable snapshot.
 
-Таким образом nightly rebuild не затрагивает пользовательские данные.
+Nightly rebuild книжного индекса не затрагивает пользователей.
 
-## 5. Built-in search flow
+## 5. Встроенные каталоги
+
+В `bookferry.db` инициализируются четыре built-in source:
+
+| `catalog_code` | Источник | Метаданные |
+|---|---|---|
+| `gutenberg` | Project Gutenberg | CSV |
+| `anarchist` | The Anarchist Library | OPDS / AmuseWiki |
+| `flibusta` | Flibusta | SQL dumps |
+| `anarchist_ru` | Библиотека Анархизма | OPDS / AmuseWiki |
+
+Их `base_url` используется при построении URL выбранной книги и при отображении конфигурации пользователю, но **поиск по встроенному каталогу выполняется только локально**.
+
+## 6. Built-in search flow
 
 ```mermaid
 sequenceDiagram
@@ -218,26 +240,25 @@ sequenceDiagram
     participant FTS as catalog.db / FTS5
 
     C->>API: GET /search
-    API->>U: resolve user + catalog
+    API->>U: resolve user + active catalog
     U-->>API: catalog_code / base_url
     API->>FTS: MATCH title + author
-    FTS-->>API: external_id + metadata
-    API->>API: build EPUB URL
-    API-->>C: books + next page token
+    FTS-->>API: metadata + external_id
+    API->>API: build source-specific EPUB URL
+    API-->>C: books + next_page_url
 ```
 
-Встроенный поиск не делает HTTP-запрос к Flibusta, Gutenberg или AmuseWiki.
+Преимущества локального поиска:
 
-Это даёт:
-
-- стабильную скорость поиска;
-- отсутствие зависимости search latency от внешнего OPDS;
-- контролируемую пагинацию;
-- меньшую нагрузку на внешние каталоги.
+- search latency не зависит от внешнего OPDS;
+- одинаковое поведение для всех встроенных каталогов;
+- контролируемая пагинация;
+- внешние сайты не получают запрос на каждый пользовательский поиск;
+- outage источника не мешает искать уже проиндексированные метаданные.
 
 ### FTS query
 
-Пользовательский запрос разбивается на слова. Каждое слово используется как prefix term.
+Пользовательский запрос разбивается на слова, каждое превращается в prefix term.
 
 Например:
 
@@ -245,28 +266,29 @@ sequenceDiagram
 лабиринт лукьян
 ```
 
-становится логически эквивалентным:
+логически превращается в:
 
 ```text
 "лабиринт"* AND "лукьян"*
 ```
 
-FTS индексирует одновременно `title` и `author`.
+FTS одновременно индексирует `title` и `author`.
 
 ### Pagination
 
 Размер страницы — 20 результатов.
 
-Для локального поиска клиент получает внутренний token:
+Локальный search возвращает token вида:
 
 ```text
 local:20
 local:40
+local:60
 ```
 
-Клиент не должен интерпретировать его структуру — только вернуть backend в следующем запросе.
+Клиент не должен интерпретировать token — только передать его обратно как `page_url` следующего запроса.
 
-## 6. Custom OPDS search flow
+## 7. Custom OPDS flow
 
 ```mermaid
 sequenceDiagram
@@ -276,34 +298,39 @@ sequenceDiagram
     participant S as safe_http
     participant O as Custom OPDS
 
+    C->>API: configure custom OPDS
+    API->>S: validate + inspect
+    S->>O: load Atom/OPDS
+    O-->>S: feed / OpenSearch description
+    S-->>API: final URL + search template
+    API->>U: save personal OPDS config
+
     C->>API: GET /search
-    API->>U: resolve user
-    U-->>API: custom_opds_url + search template
-    API->>S: validated request
-    S->>O: search request
-    O-->>S: Atom feed
-    S-->>API: response
-    API-->>C: parsed EPUB results
+    API->>U: resolve user + template
+    API->>S: validated search request
+    S->>O: search
+    O-->>API: Atom entries
+    API-->>C: EPUB results
 ```
 
-Custom OPDS принципиально не импортируется в общий `catalog.db`.
+Custom OPDS не импортируется в общий `catalog.db`.
 
 Причины:
 
-- это персональная настройка пользователя;
+- это персональная настройка;
 - источник заранее неизвестен;
-- импорт чужого каталога может быть слишком большим;
-- backend не должен превращать пользовательский URL в глобальную конфигурацию системы.
+- пользовательский каталог может быть большим или нестандартным;
+- один пользовательский URL не должен становиться глобальной конфигурацией сервиса.
 
-При выборе любого встроенного `catalog_id` поля custom OPDS очищаются, после чего поиск снова становится локальным.
+При переключении обратно на built-in `catalog_id` поля `custom_opds_url` и `custom_opds_search_template` очищаются.
 
-## 7. Download flow
+## 8. Download flow
 
-После поиска клиент получает EPUB URL. Перед скачиванием этот URL снова проходит `safe_http` validation.
+После поиска клиент получает URL выбранного EPUB. Перед скачиванием URL снова проходит `safe_http` validation.
 
-У PocketBook и Telegram разные transport requirements, поэтому после общей части flow расходится.
+Дальше flow различается только по transport requirements клиента.
 
-### 7.1 PocketBook streaming
+### 8.1 PocketBook streaming
 
 ```mermaid
 sequenceDiagram
@@ -312,7 +339,7 @@ sequenceDiagram
     participant SRC as EPUB source
 
     PB->>API: GET /download?uid=...&url=...
-    API->>SRC: GET stream=True
+    API->>SRC: validated GET stream=True
     SRC-->>API: headers
     API-->>PB: StreamingResponse starts
     loop chunks
@@ -321,23 +348,49 @@ sequenceDiagram
     end
 ```
 
-PocketBook не должен ждать, пока BookFerry сначала полностью скачает книгу.
-
 Backend:
 
 1. открывает upstream response;
-2. получает исходное имя файла и `Content-Length`, если он доступен;
-3. создаёт `StreamingResponse`;
-4. проксирует данные chunks по 64 KiB;
-5. закрывает upstream response после завершения.
+2. определяет имя файла;
+3. сохраняет исходный `Content-Length`, если он безопасно применим;
+4. создаёт `StreamingResponse` с `application/epub+zip`;
+5. проксирует chunks;
+6. считает фактически переданные bytes для логов;
+7. закрывает upstream response после завершения.
 
-Логи разделяют:
+Это исключает лишнее полное буферизование большой книги перед отправкой на ридер.
 
-- время до готовности upstream response;
-- полную длительность передачи;
-- число переданных байт.
+### 8.2 Client result from PocketBook
 
-### 7.2 Telegram + e-mail
+Успешно начатый `StreamingResponse` ещё не гарантирует, что файл дошёл до устройства.
+
+После завершения клиент вызывает:
+
+```text
+GET /download/client-result
+```
+
+и передаёт:
+
+```text
+status
+bytes
+attempts
+duration_ms
+http_status
+net_status
+title
+error
+```
+
+Endpoint принимает результат только от пользователя `client_type=pocketbook` и пишет событие `DOWNLOAD_CLIENT_RESULT`.
+
+Это разделяет две метрики:
+
+- server-side stream delivery;
+- client-side final delivery result.
+
+### 8.3 Telegram + e-mail
 
 ```mermaid
 sequenceDiagram
@@ -347,7 +400,7 @@ sequenceDiagram
     participant SMTP as SMTP server
 
     TG->>API: POST /send-book
-    API->>SRC: download EPUB
+    API->>SRC: validated download
     SRC-->>API: bytes + filename
     API->>SMTP: same bytes as attachment
     SMTP-->>API: sent
@@ -355,62 +408,69 @@ sequenceDiagram
     TG-->>TG: send_document
 ```
 
-Для этого flow книга загружается в память один раз.
+Книга загружается в память один раз. Те же bytes используются для всех e-mail получателей и для HTTP response боту.
 
-Те же байты используются:
+Ранее общий путь вида `Temp/<filename>` создавал race condition: два параллельных запроса одной книги могли удалить файл друг друга. In-memory delivery убирает этот класс гонки.
 
-- для SMTP-вложения;
-- для HTTP-ответа Telegram-боту.
+## 9. Имена файлов
 
-Временного EPUB на общем filesystem нет.
+Backend пытается определить upstream filename в следующем порядке:
 
-Это важно не только как упрощение. Ранее два параллельных запроса одной книги использовали одинаковый путь `Temp/<filename>`, и один запрос мог удалить файл другого. In-memory flow устраняет этот класс race condition полностью.
-
-## 8. Имена файлов
-
-Backend не генерирует пользовательское имя книги.
-
-Порядок определения имени:
-
-1. `Content-Disposition` источника;
+1. `Content-Disposition` внешнего источника;
 2. basename конечного URL после redirect;
-3. если имя определить невозможно — ошибка.
+3. если имя невозможно определить — возвращается ошибка.
 
-Имя не дополняется автоматически `.epub` и не заменяется искусственным UUID.
+PocketBook формирует своё локальное имя файла из данных UI/книги уже на стороне клиента.
 
-PocketBook при сохранении на устройство формирует локальное имя из автора и названия книги, потому что это уже UI/reader concern.
+## 10. User identity и API contracts
 
-## 9. User identity и compatibility API
-
-Основная модель пользователя client-neutral:
+Основная модель пользователя:
 
 ```text
 uid + client_type
 ```
 
-Поддерживаемые значения `client_type`:
+### PocketBook / generic GET API
+
+PocketBook получает `uid` при первом запуске через:
 
 ```text
-telegram
-pocketbook
-flutter
+GET /users/register?client_type=pocketbook
 ```
 
-Наличие `flutter` в модели означает зарезервированный тип клиента; отдельный Flutter client в текущем репозитории не реализован.
+Основные endpoints:
 
-### PocketBook
+```text
+GET /catalogs
+GET /users/{uid}
+GET /users/{uid}/catalog
+GET /users/{uid}/opds
+GET /search
+GET /download
+GET /download/client-result
+```
 
-При первом запуске получает UUID через `/users/register` и хранит его локально.
+### Telegram compatibility layer
 
-### Telegram
+Работающий Telegram client появился раньше generic GET API, поэтому его контракт сохранён:
 
-Для существующего бота сохраняются endpoints по `telegram_id` и старые POST-варианты `/search` и `/send-book`.
+```text
+POST  /search
+POST  /send-book
+GET   /users/telegram/{telegram_id}
+PATCH /users/telegram/{telegram_id}/catalog
+PATCH /users/telegram/{telegram_id}/opds
+PATCH /users/telegram/{telegram_id}/emails
+PATCH /users/telegram/{telegram_id}/subject
+```
 
-Новая общая логика поиска и скачивания при этом находится в тех же backend-функциях, а compatibility endpoint только адаптирует входной контракт.
+Telegram user создаётся лениво при первом изменении catalog/OPDS settings.
 
-## 10. PocketBook plain protocol
+Compatibility layer не дублирует core search/download implementation — он только адаптирует входной HTTP contract к общей логике.
 
-PocketBook SDK удобно работает через `QuickDownload()`, поэтому для ряда общих GET endpoints поддерживается `plain=1`.
+## 11. PocketBook plain protocol
+
+Ряд GET endpoints поддерживает `plain=1`, потому что компактный protocol проще парсить из C / InkView клиента.
 
 Пример search response:
 
@@ -423,77 +483,142 @@ NEXT	<page_token>
 
 Строковые значения percent-encoded.
 
-Это не отдельный PocketBook API, а альтернативное представление того же ресурса.
+Пример registration response:
 
-## 11. SSRF protection
+```text
+UID	<uid>	<catalog_id>	<catalog_name>
+```
 
-Custom OPDS и URL книги могут указывать на произвольный внешний адрес, поэтому обычный `requests.get()` напрямую из API не используется.
+Это альтернативное представление общих ресурсов, а не независимый PocketBook backend.
+
+## 12. SSRF protection
+
+Custom OPDS и book URL потенциально могут указывать на произвольный адрес, поэтому небезопасный прямой `requests.get(user_url)` не используется.
 
 `safe_http.py` запрещает:
 
 - схемы кроме HTTP/HTTPS;
 - URL credentials;
 - loopback;
-- private address ranges;
-- link-local;
+- private networks;
+- link-local addresses;
 - прочие non-global IP.
 
-DNS разрешается до запроса. Redirect автоматически не следует: каждый новый `Location` проходит ту же валидацию.
+DNS разрешается до запроса. Redirect обрабатывается вручную, и каждый новый `Location` проходит повторную проверку. Число redirect ограничено.
 
-Ограничено количество redirect.
+Те же правила применяются и на этапе inspection custom OPDS, и перед фактическим EPUB download.
 
-## 12. Catalog update architecture
+## 13. Catalog update architecture
 
-Книжный индекс не обновляется по месту.
-
-### Full update
+Production updater намеренно собран в одном файле:
 
 ```text
-external sources
-       ↓
-new temporary catalog database
-       ↓
-import all built-in catalogs
-       ↓
-minimum count validation
-       ↓
-PRAGMA integrity_check
-       ↓
-FTS rebuild + ANALYZE
-       ↓
-atomic os.replace()
-       ↓
-new catalog.db
+scripts/update_all_catalogs.py
 ```
 
-Пока новый snapshot не прошёл все проверки, production продолжает использовать старый `catalog.db`.
+Отдельные `import_*.py` больше не являются частью текущей структуры.
 
-### Protection against incomplete source data
+### Full rebuild
 
-Updater проверяет минимальное количество записей по каждому каталогу. Это защищает от ситуации, когда внешний источник временно вернул пустой или сильно урезанный dataset.
+```text
+external metadata sources
+         ↓
+download/update source files
+         ↓
+new catalog.db.update
+         ↓
+import Flibusta
+         ↓
+import Project Gutenberg
+         ↓
+import The Anarchist Library
+         ↓
+import Библиотека Анархизма
+         ↓
+minimum count checks
+         ↓
+PRAGMA integrity_check
+         ↓
+FTS rebuild + ANALYZE
+         ↓
+atomic os.replace()
+         ↓
+production catalog.db
+```
 
-### Concurrent updater protection
+### Source-specific input
 
-`fcntl.flock()` не позволяет запустить второй full update одновременно с уже работающим.
+Flibusta:
+
+```text
+lib.libbook.sql.gz
+lib.libavtor.sql.gz
+lib.libavtorname.sql.gz
+```
+
+Project Gutenberg:
+
+```text
+pg_catalog.csv.gz
+```
+
+Anarchist libraries:
+
+```text
+paginated OPDS feeds
+```
+
+### Protection against incomplete data
+
+Минимальные record thresholds:
+
+```text
+flibusta      500 000
+gutenberg      50 000
+anarchist      10 000
+anarchist_ru      500
+```
+
+Если любой каталог меньше ожидаемого, новый snapshot не устанавливается.
+
+### Atomic replacement
+
+До окончания всех import и validation production продолжает использовать старый `catalog.db`.
+
+Только после успешной проверки выполняется:
+
+```text
+os.replace(temp_db, catalog_db)
+```
+
+### Concurrent update protection
+
+`fcntl.flock(... LOCK_NB)` не позволяет запустить второй full rebuild параллельно.
 
 ### Scheduling
 
-В production updater запускается systemd timer каждый день в `03:00 Asia/Almaty`.
+`deploy/bookferry-catalog-update.timer` запускает service ежедневно в:
 
-## 13. Logging and observability
+```text
+03:00 Asia/Almaty
+```
 
-Request middleware назначает каждому запросу `request_id`.
+`Persistent=true` позволяет systemd выполнить пропущенный timer после возвращения системы в работу.
 
-Если клиент передал безопасный `X-Request-ID`, он используется для корреляции между клиентом и backend. Иначе backend создаёт свой ID.
+## 14. Logging and observability
 
-Логи разделены по смыслу:
+Request middleware назначает каждому HTTP request `request_id`.
+
+Если клиент передал допустимый `X-Request-ID`, backend сохраняет его для сквозной корреляции. Иначе создаётся новый ID.
+
+Основные logger namespaces:
 
 ```text
 bookferry.access
 bookferry.api
 ```
 
-Основные business events:
+Business events:
 
 ```text
 SEARCH
@@ -503,6 +628,7 @@ DOWNLOAD
 DOWNLOAD_STREAM_READY
 DOWNLOAD_RESULT
 DOWNLOAD_ERROR
+DOWNLOAD_CLIENT_RESULT
 USER_REGISTERED
 PROFILE_READ
 CATALOG_CHANGED
@@ -511,24 +637,76 @@ EMAILS_CHANGED
 SUBJECT_CHANGED
 ```
 
-`request_id` позволяет связать HTTP access log и business log одного запроса.
+Для streaming отдельно видны:
 
-## 14. Schema evolution
+- время открытия upstream response;
+- filename;
+- upstream `Content-Length`;
+- фактически переданные bytes;
+- полная duration;
+- client-side final result от PocketBook.
 
-`init_db()` создаёт таблицы для новой установки и проверяет необходимые колонки существующей `users` table.
+## 15. Schema evolution
 
-Новые nullable columns, появившиеся в ходе развития проекта, добавляются при старте приложения через `ALTER TABLE` только если их ещё нет.
+Проект сознательно не использует отдельный migration framework.
 
-Это сохраняет простую SQLite-схему без отдельного migration framework для небольшого проекта.
+`init_db()`:
 
-## 15. Module boundaries
+- создаёт таблицы для новой установки;
+- проверяет существующую `users` table;
+- добавляет необходимые nullable columns через `ALTER TABLE`, если их ещё нет;
+- создаёт unique index для `(client_type, external_id)` при непустом external ID.
+
+Для текущего масштаба проекта это сохраняет схему простой и читаемой.
+
+## 16. Testing architecture
+
+Тестовый framework лежит отдельно от application code:
+
+```text
+tests/framework/api.py
+    thin HTTP client
+
+tests/framework/models.py
+    independent response models
+
+tests/framework/flows.py
+    reusable multi-step business flows
+
+tests/fixtures/
+    reusable state through HTTP API
+
+tests/smoke/
+    deterministic regression smoke
+
+tests/e2e/
+    real external-source boundary
+```
+
+Smoke использует committed test databases и не зависит от внешних книжных сайтов.
+
+External E2E использует локальный deterministic search index, но реально скачивает выбранный EPUB из каждого из четырёх built-in source.
+
+Allure workflow объединяет:
+
+```text
+BookFerry smoke
+BookFerry external E2E
+BookFerryBot external E2E
+```
+
+в один report, группируя сценарии по `parentSuite` и `suite`.
+
+Подробнее: [tests/README_tests.md](tests/README_tests.md).
+
+## 17. Module boundaries
 
 ```text
 main.py
     application bootstrap
 
 app/api.py
-    HTTP boundary, orchestration, compatibility endpoints
+    HTTP boundary, orchestration, client adapters
 
 app/models.py
     request/response models
@@ -540,10 +718,10 @@ app/logging_config.py
     request ID and application logging
 
 app/db/database.py
-    users/catalogs database schema
+    users/catalog configuration schema
 
 app/db/users.py
-    user persistence
+    user persistence and activity
 
 app/db/catalogs.py
     built-in catalog configuration access
@@ -564,60 +742,65 @@ app/services/download.py
     EPUB download and streaming
 
 app/services/mail.py
-    SMTP delivery
-
-scripts/import_*.py
-    metadata source adapters/importers
+    SMTP delivery from in-memory bytes
 
 scripts/update_all_catalogs.py
-    production full catalog rebuild
+    complete production catalog rebuild
 
 pocketbook/main.c
-    PocketBook UI and API client
+    PocketBook UI, persistence and API client
+
+tests/
+    independent HTTP-level automation
 ```
 
-## 16. Architectural invariants
+## 18. Architectural invariants
 
-При дальнейшей разработке важно сохранять несколько правил.
+При дальнейшей разработке важно сохранять следующие правила.
 
 ### Built-in search remains local
 
-Нельзя возвращать встроенные каталоги к сетевому поиску на каждый запрос пользователя без отдельной причины.
+Встроенные каталоги не должны возвращаться к remote search на каждый запрос пользователя без отдельного архитектурного решения.
 
 ### User DB and catalog DB remain separate
 
-`bookferry.db` — состояние пользователей.
+`bookferry.db` — persistent user state.
 
 `catalog.db` — disposable derived index.
 
 ### EPUB is downloaded on demand
 
-Backend не является постоянным файловым зеркалом книжных источников.
+Backend не должен превращаться в постоянное файловое зеркало книжных источников.
 
-### Custom URL is untrusted input
+### External URLs are untrusted
 
-Любой custom OPDS URL, redirect и book URL должен проходить `safe_http`.
+Custom OPDS URL, redirects и book URLs должны проходить через safe HTTP validation.
 
 ### Catalog rebuild is atomic
 
-Большой импорт не пишет прямо в рабочий `catalog.db`.
+Большой import не пишет напрямую в production `catalog.db`.
 
 ### Client-specific code stays at the edge
 
-PocketBook plain responses и Telegram compatibility endpoints допустимы как адаптеры, но core search/download logic не должна дублироваться по клиентам.
+PocketBook plain protocol и Telegram compatibility endpoints допустимы как adapters. Core search/download logic не дублируется по клиентам.
 
-### Do not reintroduce shared temporary EPUB paths
+### Shared temporary EPUB paths stay removed
 
-Если файл уже находится в памяти, нет причины записывать его в общий `Temp/<filename>` только для последующего чтения и удаления.
+Не следует возвращать общий `Temp/<filename>` flow для данных, которые уже можно передать из памяти или stream.
 
-## 17. Known limitations
+### Tests follow real client contracts
 
-Текущее состояние проекта сознательно ограничено:
+Production API не расширяется только ради удобства тестов. Automation должна работать через endpoint'ы, которыми пользуются реальные клиенты.
+
+## 19. Known limitations
+
+Текущий scope проекта сознательно ограничен:
 
 - EPUB only;
 - OPDS 1.x / Atom / OpenSearch, без OPDS 2.0 JSON;
-- полный pytest regression suite ещё не реализован;
 - отдельный Flutter client пока отсутствует;
-- SMTP отправляется синхронно в рамках Telegram download request.
+- SMTP отправляется синхронно в рамках Telegram download request;
+- test suite является компактным smoke/E2E набором, а не полным exhaustive regression suite;
+- external E2E по определению зависит от доступности сторонних источников.
 
-Эти ограничения являются текущим scope проекта, а не скрытыми возможностями.
+Это зафиксированные границы текущей версии, а не скрытые возможности.
