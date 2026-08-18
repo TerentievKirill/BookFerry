@@ -16,7 +16,46 @@ With the current parametrization the project has **22 test cases** across three 
 | Backend external E2E | 8 | Check catalog flows and the real EPUB download boundary |
 | BookFerryBot cross-repository E2E | 4 | Verify the real client/server integration against the deployed API |
 
-**Live Allure report:** https://allure.heartlab.app/
+## Quick links
+
+- **Live Allure report:** https://allure.heartlab.app/
+- **Backend smoke tests:** [BookFerry/tests/smoke](https://github.com/TerentievKirill/BookFerry/tree/readme/tests/smoke)
+- **Backend external E2E:** [BookFerry/tests/e2e/test_external_e2e.py](https://github.com/TerentievKirill/BookFerry/blob/readme/tests/e2e/test_external_e2e.py)
+- **Telegram client repository:** [BookFerryBot](https://github.com/TerentievKirill/BookFerryBot)
+- **BookFerryBot cross-repository E2E:** [BookFerryBot/tests/test_external_e2e.py](https://github.com/TerentievKirill/BookFerryBot/blob/main/tests/test_external_e2e.py)
+- **BookFerryBot E2E workflow:** [BookFerryBot/.github/workflows/external-e2e.yml](https://github.com/TerentievKirill/BookFerryBot/blob/main/.github/workflows/external-e2e.yml)
+- **Combined quality workflow:** [BookFerry/.github/workflows/allure-report.yml](../.github/workflows/allure-report.yml)
+
+## Two repositories, one quality pipeline
+
+BookFerry is not tested as an isolated repository only.
+
+The backend and the Telegram client are developed and deployed separately:
+
+```text
+BookFerry repository
+  ├─ deterministic backend smoke
+  └─ backend external E2E
+
+BookFerryBot repository
+  └─ E2E using the bot's production API client
+```
+
+The scheduled/manual quality workflow in the backend repository checks out **both repositories**, runs all three groups and writes their results into the same `allure-results` directory:
+
+```text
+BookFerry smoke
+        +
+BookFerry external E2E
+        +
+BookFerryBot production-client E2E
+        ↓
+ one Allure 3 report
+        ↓
+https://allure.heartlab.app/
+```
+
+This is useful for a real architectural reason: a backend can pass its own tests and still break an independently deployed client. The BookFerryBot scenario checks that boundary from the client side using the same API client code as the application itself.
 
 ## Testing strategy
 
@@ -24,42 +63,69 @@ The suites are separated by what a failure means, not just by directory structur
 
 ### 1. Deterministic smoke — did I break BookFerry?
 
-The smoke suite checks the basic application behavior and current client contracts.
+The smoke suite checks the basic application behavior and **both current backend client contracts**:
+
+- PocketBook uses the `uid`-based API;
+- Telegram uses its compatibility API while sharing the same backend search logic.
 
 It runs against committed SQLite test snapshots and does not require external book providers to be available. That makes it useful as fast CI feedback: a smoke failure normally points to the application or its API contract rather than to a temporary Internet dependency.
 
 The suite runs automatically on pull requests targeting `main` and on pushes to `main` / `testing`.
 
-Typical coverage includes:
+The current smoke coverage includes:
 
-- PocketBook registration;
-- Telegram lazy user creation through the real settings flow;
-- invalid client type validation;
-- profile reads and unknown-user behavior;
-- catalog switching for both real client paths;
-- deterministic local search;
-- the business flow `register/create -> select catalog -> search`.
+**PocketBook API**
+
+- user registration and UUID creation;
+- reading a user profile;
+- changing the selected catalog;
+- handling an unknown user;
+- deterministic book search through the `uid` contract.
+
+**Telegram compatibility API**
+
+- lazy user creation through the real settings flow;
+- reading a Telegram user profile;
+- changing the Telegram user's catalog;
+- handling an unknown Telegram user;
+- deterministic book search through the Telegram contract.
+
+**Contract / business behavior**
+
+- rejection of unsupported client types;
+- independent Pydantic response model validation;
+- the basic business flow `register/create -> select catalog -> search`.
+
+So the smoke suite is intentionally more than a PocketBook test set: the same backend behavior is exercised through two different real client contracts where that distinction matters.
 
 The practical question is intentionally simple:
 
-> Did this change break the basic application used by current clients?
+> Did this code change break the basic BookFerry functionality used by current clients?
+
+Smoke files:
+
+- [`tests/smoke/test_users.py`](smoke/test_users.py)
+- [`tests/smoke/test_book_flow.py`](smoke/test_book_flow.py)
 
 ### 2. Backend external E2E — does BookFerry still work with the outside world?
 
-BookFerry depends on external book sources. Those dependencies should be tested, but they should not make every normal pull request flaky.
+External E2E uses the same application and deterministic catalog metadata, but continues past local search and reaches the **real EPUB source**.
 
-The external backend suite is therefore kept separate from deterministic smoke.
+There are **two parametrized scenarios for each built-in catalog**:
 
-It is parametrized across all four built-in catalogs:
+1. **Search scenario** — create/configure a PocketBook user, select a catalog and find a known book through BookFerry.
+2. **Download scenario** — repeat the search flow, follow the selected book URL through BookFerry and retrieve a real EPUB from the external provider.
+
+The scenarios are parametrized across all four built-in catalogs:
 
 - Project Gutenberg;
 - The Anarchist Library;
 - Flibusta;
 - Библиотека Анархизма.
 
-For every catalog the suite verifies that BookFerry can find a known title using its catalog metadata. The download scenarios then continue across the network boundary and retrieve a real EPUB from the external source.
+That produces 8 backend external E2E cases without duplicating the scenario code.
 
-The returned file is checked as an actual book payload, not just as a successful HTTP response:
+The download test validates an actual book payload, not just a successful HTTP response:
 
 ```python
 assert response.status_code == 200
@@ -68,9 +134,13 @@ assert len(response.content) > 1000
 assert response.content.startswith(b"PK")
 ```
 
+The last check verifies the ZIP signature used by EPUB files. Together these assertions make the scenario closer to "a usable book was returned" than simply "the endpoint answered 200".
+
 A failure here has a different diagnostic meaning from a smoke failure: BookFerry may have regressed, but an external provider may also be unavailable or may have changed its behavior.
 
-That distinction is the reason this suite has its own workflow.
+That distinction is why this suite has its own workflow instead of running as part of every pull request.
+
+Backend E2E source: [`tests/e2e/test_external_e2e.py`](e2e/test_external_e2e.py).
 
 ### 3. Cross-repository E2E — does the real client still work with the real server?
 
@@ -100,11 +170,17 @@ BookFerryBot production API client
      download + validate EPUB
 ```
 
-So a server-side contract change can be caught from the point of view of an independently deployed client rather than only from the backend test framework.
+The test connects to the deployed BookFerry API rather than to the Dockerized backend used by the deterministic suite. In other words, this is a compatibility check across **two repositories and two independently deployable components**.
 
-The bot E2E currently runs four catalog cases and validates the downloaded EPUB by filename, payload size and ZIP/EPUB signature.
+The scenario runs for the same four catalog families and validates the downloaded EPUB by filename, payload size and ZIP/EPUB signature.
 
-This gives the project a useful cross-repository compatibility check without building a separate heavyweight end-to-end environment.
+This means a server-side contract change can be caught from the point of view of the actual client integration rather than only from the backend test framework.
+
+Direct links:
+
+- [BookFerryBot E2E test](https://github.com/TerentievKirill/BookFerryBot/blob/main/tests/test_external_e2e.py)
+- [BookFerryBot production API client](https://github.com/TerentievKirill/BookFerryBot/blob/main/app/api_client.py)
+- [BookFerryBot scheduled E2E workflow](https://github.com/TerentievKirill/BookFerryBot/blob/main/.github/workflows/external-e2e.yml)
 
 ## Test architecture
 
@@ -117,17 +193,23 @@ flowchart TD
     BE2E --> TESTDB
     BE2E --> SOURCES[Real book sources]
 
-    BOTREPO[BookFerryBot repository] --> BOTE2E[Bot cross-repository E2E]
+    BOTREPO[BookFerryBot repository] --> BOTE2E[Production-client E2E]
     BOTE2E --> LIVE[Deployed BookFerry API]
     LIVE --> SOURCES
 
-    SMOKE --> RESULTS[allure-results]
+    QUALITY[Scheduled / manual quality run] --> BACKENDREPO[Checkout BookFerry]
+    QUALITY --> BOTCHECKOUT[Checkout BookFerryBot]
+    BACKENDREPO --> SMOKE
+    BACKENDREPO --> BE2E
+    BOTCHECKOUT --> BOTE2E
+
+    SMOKE --> RESULTS[Shared allure-results]
     BE2E --> RESULTS
     BOTE2E --> RESULTS
-    RESULTS --> ALLURE[Unified Allure report]
+    RESULTS --> ALLURE[Unified Allure 3 report]
 ```
 
-The important part of this diagram is not the number of boxes. Each level answers a different question and has a different failure boundary.
+The important part is not the number of boxes. Each level answers a different question and has a different failure boundary, while the combined report still gives one place to inspect the state of the whole system.
 
 ## Representative test design
 
@@ -151,7 +233,7 @@ assert book.url
 
 The test does not know how registration, catalog selection or search requests are serialized. Those details belong to the API and flow layers.
 
-Another useful property is that the same business capability is exercised through both current client contracts. PocketBook uses the `uid`-based API, while Telegram still has compatibility endpoints. The tests can therefore detect client-specific regressions without duplicating the whole framework.
+The same idea is used for Telegram: test scenarios describe client behavior, while the framework hides only repetitive protocol details rather than the meaning of the test.
 
 ## Small framework, clear responsibilities
 
@@ -171,7 +253,7 @@ test scenarios
 
 Each method performs one request and returns the original `requests.Response`.
 
-Assertions do not belong here:
+Assertions stay in the scenario layer:
 
 ```python
 response = api.register_user(client_type="pocketbook")
@@ -243,7 +325,7 @@ The automation around the tests is part of the test design, not an afterthought.
 [`tests.yml`](../.github/workflows/tests.yml) builds the application in Docker, starts it with deterministic test databases and runs the smoke suite.
 
 ```text
-checkout
+checkout BookFerry
    ↓
 install dependencies
    ↓
@@ -251,10 +333,12 @@ build BookFerry Docker image
    ↓
 start isolated BookFerry
    ↓
-run deterministic smoke
+run PocketBook + Telegram smoke
    ↓
 upload allure-results
 ```
+
+This workflow runs on pull requests targeting `main` and on pushes to `main` / `testing`.
 
 The goal is fast and interpretable feedback on ordinary changes.
 
@@ -264,11 +348,19 @@ The goal is fast and interpretable feedback on ordinary changes.
 
 Keeping it separate means a third-party outage does not automatically turn normal development CI red.
 
+### BookFerryBot's own external workflow
+
+The client repository also has its own [scheduled/manual external E2E workflow](https://github.com/TerentievKirill/BookFerryBot/blob/main/.github/workflows/external-e2e.yml).
+
+It runs the [cross-repository test](https://github.com/TerentievKirill/BookFerryBot/blob/main/tests/test_external_e2e.py) with the bot's production API client against the deployed BookFerry service.
+
+So the client/server compatibility check can run independently of the backend repository's larger reporting pipeline.
+
 ### Combined quality run
 
 [`allure-report.yml`](../.github/workflows/allure-report.yml) is the larger scheduled/manual quality workflow.
 
-It checks out **two repositories**:
+It explicitly checks out **two repositories**:
 
 ```text
 BookFerry
@@ -285,9 +377,9 @@ BookFerryBot cross-repository E2E
 
 The backend suites run against the Dockerized test instance. The BookFerryBot scenario uses the bot's production API client and connects to the deployed BookFerry API.
 
-All results are written into the same `allure-results` directory and published as one Allure 3 report.
+All three suites write into the same `allure-results` directory. Allure 3 groups them by suite and publishes one report for the whole quality run.
 
-**Published report:** https://allure.heartlab.app/
+**Live report:** https://allure.heartlab.app/
 
 Allure metadata stays intentionally minimal:
 
@@ -305,7 +397,7 @@ One reason for keeping the layers separate is diagnostic value.
 
 | Failure | First area to investigate |
 |---|---|
-| Deterministic smoke | BookFerry regression or HTTP contract change |
+| Deterministic PocketBook/Telegram smoke | BookFerry regression or HTTP contract change |
 | Backend external E2E | BookFerry integration or external source |
 | BookFerryBot E2E | Bot/server compatibility, deployed backend, or external source |
 
@@ -317,6 +409,9 @@ A few choices are intentionally boring.
 
 **Why not test every endpoint?**  
 Because this is a small project and test count is not the goal. Straightforward low-value cases such as a dedicated `GET /health -> 200` test can be added at any time; they do not demonstrate a different testing technique or protect an important business flow today.
+
+**Why test both PocketBook and Telegram contracts in smoke?**  
+Because they are two real clients using different public API shapes over shared backend logic. A change can preserve the common logic while still breaking one client contract.
 
 **Why not mock every external dependency?**  
 Smoke is already deterministic. The external suite exists specifically to verify the real integration boundary that mocks cannot prove.
@@ -355,11 +450,9 @@ tests/
 └── README_tests.md
 ```
 
-The cross-repository client scenario lives in:
+The client-side cross-repository scenario is intentionally outside this tree because it belongs to the independently maintained client repository:
 
-```text
-BookFerryBot/tests/test_external_e2e.py
-```
+- [BookFerryBot/tests/test_external_e2e.py](https://github.com/TerentievKirill/BookFerryBot/blob/main/tests/test_external_e2e.py)
 
 ## Running locally
 
@@ -369,7 +462,7 @@ BookFerry should be available at:
 http://127.0.0.1:8000
 ```
 
-Run deterministic smoke:
+Run deterministic backend smoke:
 
 ```bash
 pytest tests/smoke -v -s -m "not e2e"
@@ -393,4 +486,4 @@ Use another backend instance:
 pytest tests -v --base-url=http://example:8000
 ```
 
-The framework is deliberately small. The interesting part is not how many abstractions or tests can be added, but how little infrastructure is needed to get useful, diagnosable confidence from a real running system.
+The framework is deliberately small. The interesting part is not how many abstractions or tests can be added, but how little infrastructure is needed to get useful, diagnosable feedback from a real running system — including a separately deployed client from another repository.
