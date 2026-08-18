@@ -1,73 +1,80 @@
 # BookFerry API Tests
 
-This directory contains a small API automation framework for BookFerry.
+This directory contains a deliberately small API automation framework for BookFerry.
 
-The suite is intentionally compact. Its purpose is to test the real BookFerry HTTP contract without building a large framework around a small project.
-
-The structure stays simple:
+The goal is not to build a large test platform around a small service. The suite checks the real HTTP contracts used by BookFerry clients and keeps the layers easy to follow:
 
 ```text
 HTTP client -> fixtures / reusable flows -> test scenarios
 ```
 
-Application Pydantic models are not imported into the tests. The test suite has its own response models, so HTTP responses are validated independently.
+Application Pydantic models are not imported into the tests. Test-side response models live in `tests/framework/models.py`, so HTTP responses are validated independently from the models that produced them.
 
 ## What is tested
 
-The server currently has two client paths:
+The backend currently serves two real client paths:
 
-- PocketBook uses the `uid` based GET API;
-- the existing Telegram bot uses compatibility endpoints and is maintained in a separate repository.
+- PocketBook uses the `uid`-based GET API;
+- Telegram uses compatibility endpoints while sharing the same search/download backend logic.
 
-This test suite focuses on the BookFerry server and the PocketBook API contract. It does not create a second artificial generic user API only for tests.
+The tests cover both paths where that adds value, without creating test-only production endpoints.
 
-### Smoke tests
+## Smoke suite
 
-Smoke tests run against deterministic local test databases and do not require external book sources to be available.
+Smoke tests use committed deterministic SQLite snapshots and do not depend on external book sources being available.
 
-They cover:
+Current smoke coverage includes:
 
 - PocketBook registration;
+- Telegram user creation through the real lazy settings flow;
 - rejection of unsupported client types;
-- reading a user profile;
-- changing the PocketBook catalog;
-- handling of an unknown user;
-- book search;
-- response model validation;
-- the basic business flow: register -> select catalog -> search.
+- reading PocketBook and Telegram profiles;
+- changing PocketBook and Telegram catalogs;
+- `404` for unknown PocketBook and Telegram users;
+- local book search for PocketBook;
+- local book search for Telegram;
+- independent Pydantic response validation;
+- the basic business flow `register/create -> select catalog -> search`.
 
-The smoke suite is intended to answer one question:
+The smoke suite answers one practical question:
 
-> Did this code change break the basic BookFerry functionality?
+> Did this code change break the basic BookFerry behavior used by current clients?
 
-### External E2E tests
+Smoke files:
 
-External E2E scenarios use the same application but continue past local search and reach the real EPUB source.
+```text
+tests/smoke/test_users.py
+tests/smoke/test_book_flow.py
+```
 
-There are two parametrized scenarios:
+## External E2E suite
 
-1. **Search flow** — register a PocketBook user, select a built-in catalog and find a known book in the local BookFerry index.
+External E2E starts the same BookFerry application with deterministic local metadata, then continues across the network boundary to real EPUB sources.
+
+There are two parametrized scenarios for each built-in catalog:
+
+1. **Search flow** — register a PocketBook user, select a catalog and find a known book in the local BookFerry index.
 2. **Download flow** — perform the same search and download the selected EPUB through BookFerry from the real source.
 
-The download scenario verifies:
-
-- HTTP 200;
-- EPUB content type;
-- non-empty content;
-- ZIP/EPUB signature (`PK`).
-
-The current catalog cases are:
+Catalog cases currently cover:
 
 - Project Gutenberg;
 - The Anarchist Library;
 - Flibusta;
 - Библиотека Анархизма.
 
-External E2E tests are marked with `@pytest.mark.e2e`.
+The download scenario verifies:
 
-A download failure can mean either a BookFerry regression or a real problem with an external source, which is why these scenarios are kept separate from deterministic smoke tests.
+- HTTP `200`;
+- EPUB content type;
+- non-trivial response size;
+- ZIP/EPUB signature (`PK`).
 
-## Structure
+External scenarios are marked with `@pytest.mark.e2e`.
+
+A failure here may mean either a BookFerry regression or a real external-source outage/change. That is why these tests are intentionally separated from deterministic smoke CI.
+
+## Directory structure
 
 ```text
 tests/
@@ -85,63 +92,63 @@ tests/
 │
 ├── smoke/
 │   ├── test_book_flow.py
-│   ├── test_search.py
 │   └── test_users.py
 │
 ├── e2e/
 │   └── test_external_e2e.py
 │
-└── conftest.py
+├── conftest.py
+└── README_tests.md
 ```
 
 ## `framework/api.py`
 
-`BookFerryApi` is a thin HTTP wrapper around the current server API.
+`BookFerryApi` is a thin HTTP wrapper around the real server API.
 
-Each method performs one HTTP operation and returns the original `requests.Response`.
+Each method performs one HTTP request and returns the original `requests.Response`. Assertions do not belong in this layer.
 
-Assertions stay outside this layer:
+Example:
 
 ```python
-response = api.register_user(
-    client_type="pocketbook",
-)
-
+response = api.register_user(client_type="pocketbook")
 assert response.status_code == 200
 ```
 
-The PocketBook configuration methods use the same GET endpoints as the real client:
+The wrapper covers endpoints used by current clients, including:
 
 ```text
-GET /users/register
-GET /users/{uid}/catalog
-GET /users/{uid}/opds
-GET /search
-GET /download
+GET   /users/register
+GET   /users/{uid}
+GET   /users/{uid}/catalog
+GET   /users/{uid}/opds
+GET   /search
+GET   /download
+GET   /users/telegram/{telegram_id}
+PATCH /users/telegram/{telegram_id}/catalog
 ```
 
-Tests normally use the JSON representation. The real C client can request the same resources with `plain=1`.
+Tests normally use JSON responses. The PocketBook C client can request the supported GET resources with `plain=1`.
 
 ## `framework/models.py`
 
-Tests use their own Pydantic response models:
+Test response models are independent from `app.models`.
+
+Example:
 
 ```python
 user = User.model_validate(response.json())
 ```
 
-They are intentionally separate from `app.models`.
-
-This gives model validation some value as an independent HTTP contract check instead of validating a response with the exact same model that generated it.
+This makes model validation an actual contract check instead of validating an application response with the exact same model that created it.
 
 ## `framework/flows.py`
 
 Flows contain reusable multi-step business scenarios.
 
-For example:
+Typical flow:
 
 ```text
-register PocketBook
+register/create client
         ↓
 select catalog
         ↓
@@ -150,40 +157,43 @@ read profile
 search books
 ```
 
-Simple HTTP requests stay in `BookFerryApi`. Only multi-step scenarios belong in the flow layer.
-
-The current helper:
+Examples used by the current smoke suite:
 
 ```python
 flow.create_configured_pocketbook_user(catalog_id=3)
+flow.create_configured_telegram_user(telegram_id=..., catalog_id=3)
+flow.find_first_book(uid=..., query="Лабиринт отражений")
 ```
 
-creates a PocketBook user through the same registration and catalog endpoints used by the actual client.
+Single HTTP calls stay in `BookFerryApi`; only reusable multi-step behavior belongs in `flows.py`.
 
-## `fixtures/`
+## Fixtures
 
-Fixtures prepare reusable test state.
+`tests/fixtures/users.py` prepares reusable client state through the HTTP API.
 
-`pocketbook_user` creates a new PocketBook user.
+The suite intentionally does not mutate the SQLite files directly to prepare scenarios. Pytest talks to BookFerry through HTTP, the same way a real client does.
 
-`configured_pocketbook_user` additionally selects the deterministic test catalog used by search smoke tests.
-
-E-mail and subject are deliberately not part of PocketBook fixtures: those settings belong to the Telegram delivery flow.
+Telegram e-mail/subject settings are not mixed into the basic search fixture because they belong to the delivery path rather than the minimal search smoke.
 
 ## Test data
 
-Tests use dedicated SQLite databases:
+Tests use two committed SQLite snapshots:
 
 ```text
 bookferry_test.db  — users and catalog configuration
-catalog_test.db    — searchable book catalog snapshot
+catalog_test.db    — searchable metadata snapshot
 ```
 
-Tests do not access those databases directly.
+The Docker test container receives these paths through environment variables:
 
-BookFerry receives their paths when the test container starts, while pytest interacts with the service only through HTTP.
+```text
+DB_NAME=/app/tests/data/bookferry_test.db
+CATALOG_DB_NAME=/app/tests/data/catalog_test.db
+```
 
-This keeps smoke search deterministic while allowing external E2E download tests to use real source URLs generated by BookFerry.
+Each CI runner starts from the repository copy, so users created during a run disappear with the runner.
+
+The local catalog snapshot makes search deterministic while external E2E can still use the source URLs generated by BookFerry and verify the actual download boundary.
 
 ## Running locally
 
@@ -196,13 +206,13 @@ http://127.0.0.1:8000
 Run deterministic smoke tests:
 
 ```bash
-pytest tests -v -m "not e2e"
+pytest tests/smoke -v -s -m "not e2e"
 ```
 
 Run external E2E only:
 
 ```bash
-pytest tests/e2e -v -s -m e2e
+pytest tests/e2e/test_external_e2e.py -v -s -m e2e
 ```
 
 Run everything:
@@ -219,49 +229,103 @@ pytest tests -v --base-url=http://example:8000
 
 ## CI
 
-The project has separate CI jobs for deterministic smoke and external E2E.
+BookFerry has three GitHub Actions workflows related to tests and reporting.
 
-### Smoke CI
+### `tests.yml` — deterministic smoke
 
-The regular test workflow:
+Runs on:
+
+- push to `main`;
+- push to `testing`;
+- pull request targeting `main`.
+
+Flow:
 
 ```text
 checkout
    ↓
-install dependencies
+install Python dependencies
    ↓
 build BookFerry Docker image
    ↓
-start BookFerry with test databases
+start BookFerry with committed test DBs
    ↓
-run smoke tests
+run tests/smoke
+   ↓
+upload allure-results artifact
 ```
 
-Smoke should fail only when the application or its deterministic test contract is broken.
+Smoke should fail only when the application or its deterministic HTTP contract is broken.
 
-### External E2E
+### `external-e2e.yml` — real-source boundary
 
-The external workflow can run separately:
+Triggered manually through `workflow_dispatch`.
+
+Flow:
 
 ```text
 start BookFerry
     ↓
-search known books
+search known books in all built-in catalogs
     ↓
 download EPUB from real source
     ↓
 validate returned file
+    ↓
+upload allure-results artifact
 ```
 
-This intentionally checks the boundary between BookFerry and the outside world.
+Keeping this workflow separate prevents temporary third-party outages from turning ordinary commits red.
 
-Every CI run starts from committed test databases, so users created during tests disappear with the runner.
+### `allure-report.yml` — combined report
 
-## Design decisions
+Runs daily and can also be triggered manually.
+
+It checks out both repositories:
+
+```text
+BookFerry
+BookFerryBot
+```
+
+Then it runs:
+
+```text
+BookFerry smoke
+BookFerry external E2E
+BookFerryBot external E2E
+```
+
+All suites write into one `allure-results` directory. Allure 3 groups the final report by `parentSuite` and `suite`, so backend smoke, backend external E2E and bot E2E remain visually separated without producing multiple reports.
+
+Published report: https://allure.heartlab.app/
+
+## Allure metadata
+
+Tests use only a small amount of Allure metadata on purpose.
+
+Typical structure:
+
+```python
+@allure.parent_suite("BookFerry")
+@allure.suite("Smoke")
+@allure.title("PocketBook user can be registered")
+```
+
+External tests use:
+
+```python
+@allure.parent_suite("BookFerry")
+@allure.suite("External E2E")
+```
+
+The point is readable reporting, not decorating every line with reporting-specific code.
+
+## Design rules
 
 The framework is intentionally small.
 
-There is no generic repository layer, HTTP abstraction hierarchy or direct database helper in the tests.
+There is no generic repository layer, HTTP abstraction hierarchy, direct DB helper, or test-only production API.
 
 The main rules are:
 
@@ -271,7 +335,9 @@ The main rules are:
 - reusable state belongs in fixtures;
 - reusable multi-step behavior belongs in flows;
 - smoke data is deterministic;
-- external E2E is separated from smoke;
-- tests follow endpoints used by real clients instead of keeping obsolete API routes alive.
+- external E2E is isolated from smoke;
+- both real client contracts may be tested when useful;
+- tests follow endpoints used by real clients instead of keeping obsolete routes alive only for automation;
+- Allure metadata stays minimal and readable.
 
-The result is a small suite that stays close to the application and is easy to read.
+The result is a compact suite that is close to the application, easy to understand and useful both as regression protection and as an example of API automation structure.
