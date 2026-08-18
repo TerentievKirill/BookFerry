@@ -1,5 +1,7 @@
 # BookFerry Test Engineering
 
+[Русский](README_tests_RU.md) | **English**
+
 BookFerry is a small production project, so there is little value in building hundreds of tests just to increase the test count.
 
 Instead, I built the test infrastructure using the same principles I would use for a much larger production system, while keeping the suite proportional to the size of the project.

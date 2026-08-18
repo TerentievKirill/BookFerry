@@ -12,7 +12,7 @@ BookFerry уже работает как живой сервис. Главная
 
 > Текущий контракт проекта: EPUB only.
 
-**Полезные ссылки:** [Swagger API](https://api.heartlab.app/docs) · [Allure report](https://allure.heartlab.app/) · [архитектура](ARCHITECTURE.md) · [тесты](tests/README_tests.md)
+**Полезные ссылки:** [Swagger API](https://api.heartlab.app/docs) · [Allure report](https://allure.heartlab.app/) · [архитектура](ARCHITECTURE.md) · [тесты](tests/README_tests_RU.md)
 
 ## Возможности
 
@@ -287,7 +287,8 @@ BookFerry/
 │   ├── framework/
 │   ├── smoke/
 │   ├── e2e/
-│   └── README_tests.md
+│   ├── README_tests_EN.md
+│   └── README_tests_RU.md
 ├── deploy/
 │   ├── bookferry-catalog-update.service
 │   └── bookferry-catalog-update.timer
@@ -364,7 +365,7 @@ pytest tests -v
 
 Smoke CI запускается на push в `main`/`testing` и pull request в `main`. External E2E вынесен в отдельный manual workflow. Ежедневный Allure workflow объединяет результаты backend smoke, backend external E2E и E2E Telegram-бота в один отчёт.
 
-Подробнее: [tests/README_tests.md](tests/README_tests.md).
+Подробнее: [tests/README_tests_RU.md](tests/README_tests_RU.md).
 
 ## Архитектурные инварианты
 
