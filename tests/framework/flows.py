@@ -1,11 +1,17 @@
+import allure
+
 from tests.framework.api import BookFerryApi
 from tests.framework.models import Book, SearchResponse, TelegramUser, User
 
 
+# Test flows keep the smoke tests short and readable. This is a bit more structure
+# than BookFerry really needs at this size, but it shows how I prefer to organize
+# reusable test scenarios when the suite grows.
 class BookFerryFlow:
     def __init__(self, api: BookFerryApi):
         self.api = api
 
+    @allure.step("Create configured PocketBook user")
     def create_configured_pocketbook_user(
         self,
         catalog_id: int,
@@ -25,6 +31,7 @@ class BookFerryFlow:
 
         return User.model_validate(response.json())
 
+    @allure.step("Create configured Telegram user")
     def create_configured_telegram_user(
         self,
         telegram_id: int,
@@ -42,6 +49,7 @@ class BookFerryFlow:
 
         return TelegramUser.model_validate(response.json())
 
+    @allure.step("Find first book: {query}")
     def find_first_book(
         self,
         uid: str,
