@@ -6,7 +6,7 @@
 
 BookFerry — сервис поиска и доставки EPUB-книг для PocketBook и Telegram.
 
-Проект состоит из FastAPI backend, локального полнотекстового индекса книжных каталогов и нативного клиента для PocketBook. Telegram-бот находится в отдельном репозитории: [BookFerryBot](https://github.com/TerentievKirill/BookFerryBot).
+Проект состоит из FastAPI backend, локального полнотекстового индекса книжных каталогов и нативного клиента для PocketBook (а так же Amason Kindle и других ридеров). Telegram-бот находится в отдельном репозитории: [BookFerryBot](https://github.com/TerentievKirill/BookFerryBot).
 
 BookFerry уже работает как живой сервис. Главная архитектурная идея проекта: **метаданные книг ищутся локально, а сам EPUB загружается у внешнего источника только после выбора пользователем**. Сервер не хранит постоянную коллекцию книг.
 
