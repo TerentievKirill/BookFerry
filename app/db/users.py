@@ -4,7 +4,7 @@ import uuid
 from app.db.database import get_connection
 
 
-SUPPORTED_CLIENT_TYPES = {"telegram", "pocketbook", "flutter"}
+SUPPORTED_CLIENT_TYPES = {"telegram", "pocketbook", "flutter", "web"}
 
 
 def _default_catalog_id(cursor):

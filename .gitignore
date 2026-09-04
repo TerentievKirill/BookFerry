@@ -4,7 +4,6 @@ build/
 
 *.o
 
-
 compile_commands.json
 CMakeCache.txt
 CMakeFiles/
@@ -16,3 +15,7 @@ __pycache__/
 Temp/
 *.pyc
 .env
+
+node_modules/
+playwright-report/
+test-results/

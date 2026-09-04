@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BookFerry Web</title>
+  <style>
+    :root {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #202124;
+      background: #f5f6f8;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    main {
+      width: min(760px, calc(100% - 32px));
+      margin: 48px auto;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+    }
+
+    .lead {
+      margin-top: 0;
+      color: #5f6368;
+    }
+
+    form {
+      display: flex;
+      gap: 12px;
+      margin: 28px 0 18px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 0;
+      padding: 12px 14px;
+      border: 1px solid #c7c9cc;
+      border-radius: 8px;
+      font: inherit;
+    }
+
+    button,
+    .download-link {
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      font: inherit;
+      cursor: pointer;
+      text-decoration: none;
+    }
+
+    button {
+      background: #202124;
+      color: white;
+    }
+
+    button:disabled {
+      cursor: default;
+      opacity: 0.65;
+    }
+
+    #status {
+      min-height: 24px;
+      color: #5f6368;
+    }
+
+    #results {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .book-card {
+      background: white;
+      border: 1px solid #e1e3e6;
+      border-radius: 10px;
+      padding: 18px;
+    }
+
+    .book-card h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+    }
+
+    .book-card p {
+      margin: 0 0 16px;
+      color: #5f6368;
+    }
+
+    .download-link {
+      display: inline-block;
+      background: #eef1f5;
+      color: #202124;
+    }
+
+    @media (max-width: 560px) {
+      main {
+        margin-top: 28px;
+      }
+
+      form {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>BookFerry</h1>
+    <p class="lead">Минимальный веб-клиент поиска книг.</p>
+
+    <form id="search-form">
+      <label for="query" hidden>Название или автор</label>
+      <input
+        id="query"
+        name="query"
+        type="search"
+        placeholder="Название или автор"
+        minlength="1"
+        maxlength="256"
+        required
+      >
+      <button type="submit">Найти</button>
+    </form>
+
+    <div id="status" role="status" aria-live="polite"></div>
+    <section id="results" aria-label="Результаты поиска"></section>
+  </main>
+
+  <script>
+    const form = document.querySelector('#search-form');
+    const queryInput = document.querySelector('#query');
+    const searchButton = form.querySelector('button');
+    const status = document.querySelector('#status');
+    const results = document.querySelector('#results');
+
+    let uid = localStorage.getItem('bookferry_uid');
+
+    async function ensureUser() {
+      if (uid) {
+        return uid;
+      }
+
+      const response = await fetch('/users/register?client_type=web');
+      if (!response.ok) {
+        throw new Error(`Registration failed: ${response.status}`);
+      }
+
+      const user = await response.json();
+      uid = user.uid;
+      localStorage.setItem('bookferry_uid', uid);
+      return uid;
+    }
+
+    function renderBooks(books, userUid) {
+      results.replaceChildren();
+
+      if (books.length === 0) {
+        status.textContent = 'Ничего не найдено.';
+        return;
+      }
+
+      status.textContent = `Найдено: ${books.length}`;
+
+      for (const book of books) {
+        const card = document.createElement('article');
+        card.className = 'book-card';
+        card.dataset.testid = 'book-card';
+
+        const title = document.createElement('h2');
+        title.textContent = book.title;
+
+        const author = document.createElement('p');
+        author.textContent = book.author || 'Автор не указан';
+
+        const download = document.createElement('a');
+        download.className = 'download-link';
+        download.textContent = 'Скачать EPUB';
+        download.href = `/download?uid=${encodeURIComponent(userUid)}&url=${encodeURIComponent(book.url)}`;
+
+        card.append(title, author, download);
+        results.append(card);
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+
+      const query = queryInput.value.trim();
+      if (!query) {
+        return;
+      }
+
+      searchButton.disabled = true;
+      status.textContent = 'Ищу…';
+      results.replaceChildren();
+
+      try {
+        const userUid = await ensureUser();
+        const params = new URLSearchParams({ query, uid: userUid });
+        const response = await fetch(`/search?${params}`);
+
+        if (!response.ok) {
+          throw new Error(`Search failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        renderBooks(data.books, userUid);
+      } catch (error) {
+        console.error(error);
+        status.textContent = 'Не удалось выполнить поиск.';
+      } finally {
+        searchButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

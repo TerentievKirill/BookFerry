@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-ClientType = Literal["telegram", "pocketbook", "flutter"]
+ClientType = Literal["telegram", "pocketbook", "flutter", "web"]
 
 
 class SearchRequest(BaseModel):
