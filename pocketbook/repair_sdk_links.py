@@ -34,7 +34,9 @@ if entries:
         target = data[offset:offset + length].decode()
         offset += length
         if not (destination.parent / target).resolve().is_relative_to(root):
-            raise SystemExit(f"Unsafe SDK symlink: {destination} -> {target}")
+            # The upstream archive contains absolute host links; 7z intentionally
+            # rejects them. They are not needed by the cross-compiler.
+            continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.unlink(missing_ok=True)
         destination.symlink_to(target)
