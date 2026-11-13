@@ -4,6 +4,13 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <inkview.h>
 
 #define DEFAULT_SERVER_URL "https://api.heartlab.app"
@@ -15,17 +22,28 @@
 #define MAX_CATALOGS 20
 #define ITEMS_PER_PAGE 5
 #define URL_LEN 8192
+
 #define BOOKS_DIR "/mnt/ext1/Books"
 #define DOWNLOAD_ATTEMPTS 2
 #define DOWNLOAD_SESSION_TIMEOUT 45
-#define DOWNLOAD_TOTAL_TIMEOUT 60
-#define DOWNLOAD_REPORT_TIMEOUT 5
+#define DOWNLOAD_TOTAL_TIMEOUT_MS 60000LL
+#define DOWNLOAD_POLL_MS 250
+#define DOWNLOAD_REDRAW_MS 2500LL
+#define TEXT_FILE "/tmp/bookferry_text_response.tmp"
+#define TEXT_MAX (2 * 1024 * 1024)
+#define TEXT_TIMEOUT_MS 30000LL
+#define TEXT_POLL_MS 250
+#define SCANNER_POLL_MS 500
+#define SCANNER_GRACE_MS 1500LL
+#define SCANNER_TERM_GRACE_MS 2500LL
+#define SCANNER_MAX_RUNTIME_MS 30000LL
 
 enum {
     MODE_HOME = 0,
     MODE_RESULTS,
     MODE_ABOUT,
-    MODE_CATALOGS
+    MODE_CATALOGS,
+    MODE_DOWNLOAD
 };
 
 typedef struct {
@@ -47,6 +65,25 @@ typedef struct {
     char error[64];
 } DownloadTransportResult;
 
+typedef struct {
+    bool active;
+    int return_mode;
+    int session;
+    int attempt;
+    long long started_ms;
+    long long attempt_started_ms;
+    long long last_draw_ms;
+    int percent;
+    int last_draw_percent_bucket;
+    long total_bytes;
+    char status[128];
+    char request_url[URL_LEN];
+    char filepath[512];
+    char tmp_path[560];
+    BookEntry book;
+    DownloadTransportResult transport;
+} DownloadState;
+
 ifont *font;
 irect main_rect;
 
@@ -65,13 +102,41 @@ int entries_count = 0;
 int current_page = 0;
 int catalogs_count = 0;
 int catalog_page = 0;
-time_t last_tap_time = 0;
+long long last_tap_ms = 0;
 bool startup_synced = false;
+
+static DownloadState download_state;
+typedef enum {
+    REQ_NONE, REQ_REGISTER, REQ_PROFILE, REQ_CATALOGS,
+    REQ_SELECT_CATALOG, REQ_SELECT_OPDS, REQ_SEARCH, REQ_NEXT
+} RequestKind;
+typedef struct {
+    bool active;
+    int session;
+    RequestKind kind;
+    long long started_ms;
+} TextJob;
+static TextJob text_job = { .session = -1 };
+static char requested_opds[1024] = "";
+static pid_t scanner_child = -1;
+static long scanner_output_offset = 0;
+static long long scanner_started_ms = 0;
+static long long scanner_finished_ms = 0;
+static long long scanner_term_ms = 0;
+
+static void draw_screen(void);
+static void download_poll_timer(void);
+static void text_poll(void);
+static void scanner_poll(void);
+static void cancel_text(void);
+static bool request_text(RequestKind kind, const char *url, const char *label);
+static void deferred_keyboard_search(void);
 
 
 static void safe_copy(char *dst, const char *src, int dst_len) {
     if (!dst || dst_len <= 0) return;
     if (!src) src = "";
+
     strncpy(dst, src, dst_len - 1);
     dst[dst_len - 1] = '\0';
 }
@@ -95,6 +160,7 @@ static void percent_decode(const char *src, char *dst, int dst_len) {
         if (src[i] == '%' && src[i + 1] && src[i + 2]) {
             int hi = hex_value(src[i + 1]);
             int lo = hex_value(src[i + 2]);
+
             if (hi >= 0 && lo >= 0) {
                 dst[j++] = (char)((hi << 4) | lo);
                 i += 3;
@@ -160,26 +226,38 @@ static int split_fields(char *line, char **fields, int max_fields) {
     return count;
 }
 
-static char *http_get_text(const char *url, int timeout) {
-    int size = 0;
-    void *raw = QuickDownload(url, &size, timeout);
-    char *text;
+static long long now_ms(void) {
+    struct timeval tv;
 
-    if (!raw || size <= 0) {
-        if (raw) free(raw);
-        return NULL;
+    gettimeofday(&tv, NULL);
+    return ((long long)tv.tv_sec * 1000LL) + (tv.tv_usec / 1000LL);
+}
+
+static long file_size(const char *path) {
+    struct stat st;
+
+    if (!path || !path[0]) return 0;
+    if (stat(path, &st) != 0) return 0;
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0) return 0;
+
+    return (long)st.st_size;
+}
+
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    long n;
+    char *buf;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) || (n = ftell(f)) <= 0 || n > TEXT_MAX ||
+        fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf); fclose(f); return NULL;
     }
-
-    text = (char *)malloc(size + 1);
-    if (!text) {
-        free(raw);
-        return NULL;
-    }
-
-    memcpy(text, raw, size);
-    text[size] = '\0';
-    free(raw);
-    return text;
+    buf[n] = 0;
+    fclose(f);
+    return buf;
 }
 
 static void sanitize_filename(char *name) {
@@ -187,6 +265,7 @@ static void sanitize_filename(char *name) {
 
     for (i = 0; name && name[i]; i++) {
         unsigned char c = (unsigned char)name[i];
+
         if (c < 32 || strchr("/\\:*?\"|<>", c)) {
             name[i] = '_';
         }
@@ -211,17 +290,18 @@ static void truncate_utf8(char *text, int max_bytes) {
     }
 }
 
-static void clear_entries() {
+static void clear_entries(void) {
     entries_count = 0;
     current_page = 0;
     next_page_url[0] = '\0';
     memset(entries, 0, sizeof(entries));
 }
 
-static void save_settings() {
+static void save_settings(void) {
     FILE *file;
 
-    system("mkdir -p " CONFIG_DIR);
+    mkdir("/mnt/ext1/system/config", 0755);
+    mkdir(CONFIG_DIR, 0755);
 
     file = fopen(CONFIG_FILE, "w");
     if (!file) return;
@@ -233,7 +313,7 @@ static void save_settings() {
     fclose(file);
 }
 
-static void load_settings() {
+static void load_settings(void) {
     FILE *file = fopen(CONFIG_FILE, "r");
 
     if (!file) return;
@@ -276,242 +356,102 @@ static void show_progress(const char *message) {
     FullUpdate();
 }
 
-static void refresh_library() {
-    system("/ebrmain/bin/scanner.app >/dev/null 2>&1 &");
-}
-
-static bool register_user() {
-    char url[URL_LEN];
-    char *text;
-    char *fields[5];
-    int count;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/register?client_type=pocketbook&plain=1&ts=%ld",
-        server_url,
-        (long)time(NULL)
-    );
-
-    show_progress("Регистрация...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 5);
-
-    if (count < 4 || strcmp(fields[0], "UID") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_register(char *text) {
+    char *fields[5]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 5);
+    if (n < 4 || strcmp(fields[0], "UID")) return false;
     safe_copy(user_uid, fields[1], sizeof(user_uid));
     percent_decode(fields[3], catalog_name, sizeof(catalog_name));
-    custom_opds_url[0] = '\0';
+    custom_opds_url[0] = 0;
     save_settings();
-
-    free(text);
     return true;
 }
-
-static bool load_profile() {
-    char url[URL_LEN];
-    char *text;
-    char *fields[6];
-    int count;
-
-    if (!user_uid[0]) return false;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s?plain=1",
-        server_url,
-        user_uid
-    );
-
-    text = http_get_text(url, 20);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 6);
-
-    if (count < 5 || strcmp(fields[0], "PROFILE") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_profile(char *text) {
+    char *fields[6]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 6);
+    if (n < 5 || strcmp(fields[0], "PROFILE")) return false;
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-
-    if (strcmp(fields[3], "custom") == 0) {
-        percent_decode(
-            fields[4],
-            custom_opds_url,
-            sizeof(custom_opds_url)
-        );
-    } else {
-        custom_opds_url[0] = '\0';
-    }
-
+    if (!strcmp(fields[3], "custom"))
+        percent_decode(fields[4], custom_opds_url, sizeof(custom_opds_url));
+    else custom_opds_url[0] = 0;
     save_settings();
-    free(text);
     return true;
 }
-
-static bool ensure_user() {
-    if (user_uid[0]) return true;
-
-    if (!register_user()) {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Не удалось зарегистрировать устройство",
-            3000
-        );
-        return false;
-    }
-
-    return true;
-}
-
-static bool load_catalogs() {
-    char url[URL_LEN];
-    char *text;
-    char *line;
-
-    snprintf(url, sizeof(url), "%s/catalogs?plain=1", server_url);
-
-    show_progress("Библиотеки...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    catalogs_count = 0;
-    catalog_page = 0;
+static bool parse_catalogs(char *text) {
+    char *line = text;
+    catalogs_count = catalog_page = 0;
     memset(catalogs, 0, sizeof(catalogs));
-
-    line = text;
-
     while (line && *line && catalogs_count < MAX_CATALOGS) {
-        char *eol = strchr(line, '\n');
-        char *fields[4];
-        int count;
-
-        if (eol) *eol = '\0';
-        line[strcspn(line, "\r")] = '\0';
-        count = split_fields(line, fields, 4);
-
-        if (count >= 3 && strcmp(fields[0], "CATALOG") == 0) {
-            CatalogEntry *catalog = &catalogs[catalogs_count++];
-            catalog->id = atoi(fields[1]);
-            percent_decode(
-                fields[2],
-                catalog->name,
-                sizeof(catalog->name)
-            );
-        } else if (
-            count >= 2 &&
-            strcmp(fields[0], "CUSTOM") == 0
-        ) {
-            CatalogEntry *catalog = &catalogs[catalogs_count++];
-            catalog->custom = true;
-            percent_decode(
-                fields[1],
-                catalog->name,
-                sizeof(catalog->name)
-            );
+        char *eol = strchr(line, '\n'), *fields[4];
+        int n;
+        if (eol) *eol = 0;
+        line[strcspn(line, "\r")] = 0;
+        n = split_fields(line, fields, 4);
+        if (n >= 3 && !strcmp(fields[0], "CATALOG")) {
+            CatalogEntry *c = &catalogs[catalogs_count++];
+            c->id = atoi(fields[1]);
+            percent_decode(fields[2], c->name, sizeof(c->name));
+        } else if (n >= 2 && !strcmp(fields[0], "CUSTOM")) {
+            CatalogEntry *c = &catalogs[catalogs_count++];
+            c->custom = true;
+            percent_decode(fields[1], c->name, sizeof(c->name));
         }
-
         line = eol ? eol + 1 : NULL;
     }
-
-    free(text);
     return catalogs_count > 0;
 }
-
-static bool select_catalog(CatalogEntry *catalog) {
-    char url[URL_LEN];
-    char *text;
-    char *fields[4];
-    int count;
-
-    if (!catalog || catalog->custom || !user_uid[0]) return false;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s/catalog?catalog_id=%d&plain=1",
-        server_url,
-        user_uid,
-        catalog->id
-    );
-
-    show_progress("Сохраняю...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 4);
-
-    if (count < 3 || strcmp(fields[0], "OK") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_selection(char *text, bool is_opds) {
+    char *fields[4]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 4);
+    if (n < 3 || strcmp(fields[0], "OK")) return false;
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-    custom_opds_url[0] = '\0';
+    if (is_opds && atoi(fields[1]) == 0)
+        safe_copy(custom_opds_url, requested_opds, sizeof(custom_opds_url));
+    else custom_opds_url[0] = 0;
     clear_entries();
     save_settings();
-
-    free(text);
     return true;
 }
-
-static bool select_custom_opds(const char *opds_url) {
-    char encoded[3072];
+static bool register_user(void) {
     char url[URL_LEN];
-    char *text;
-    char *fields[4];
-    int count;
-
-    if (!opds_url || !opds_url[0] || !user_uid[0]) return false;
-
+    snprintf(url, sizeof(url), "%s/users/register?client_type=pocketbook&plain=1&ts=%ld",
+             server_url, (long)time(NULL));
+    return request_text(REQ_REGISTER, url, "Регистрация...");
+}
+static bool load_profile(void) {
+    char url[URL_LEN];
+    if (!user_uid[0]) return false;
+    snprintf(url, sizeof(url), "%s/users/%s?plain=1", server_url, user_uid);
+    return request_text(REQ_PROFILE, url, "Профиль...");
+}
+static bool ensure_user(void) {
+    if (user_uid[0]) return true;
+    if (!text_job.active) register_user();
+    return false;
+}
+static bool load_catalogs(void) {
+    char url[URL_LEN];
+    snprintf(url, sizeof(url), "%s/catalogs?plain=1", server_url);
+    return request_text(REQ_CATALOGS, url, "Библиотеки...");
+}
+static bool select_catalog(CatalogEntry *catalog) {
+    char url[URL_LEN];
+    if (!catalog || catalog->custom || !ensure_user()) return false;
+    snprintf(url, sizeof(url), "%s/users/%s/catalog?catalog_id=%d&plain=1",
+             server_url, user_uid, catalog->id);
+    return request_text(REQ_SELECT_CATALOG, url, "Сохраняю...");
+}
+static bool select_custom_opds(const char *opds_url) {
+    char encoded[3072], url[URL_LEN];
+    if (!opds_url || !opds_url[0] || !ensure_user()) return false;
+    safe_copy(requested_opds, opds_url, sizeof(requested_opds));
     url_encode(opds_url, encoded, sizeof(encoded));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s/opds?opds_url=%s&plain=1",
-        server_url,
-        user_uid,
-        encoded
-    );
-
-    show_progress("Проверяю OPDS...");
-    text = http_get_text(url, 60);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 4);
-
-    if (count < 3 || strcmp(fields[0], "OK") != 0) {
-        free(text);
-        return false;
-    }
-
-    percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-
-    if (atoi(fields[1]) == 0) {
-        safe_copy(custom_opds_url, opds_url, sizeof(custom_opds_url));
-    } else {
-        custom_opds_url[0] = '\0';
-    }
-
-    clear_entries();
-    save_settings();
-
-    free(text);
-    return true;
+    snprintf(url, sizeof(url), "%s/users/%s/opds?opds_url=%s&plain=1",
+             server_url, user_uid, encoded);
+    return request_text(REQ_SELECT_OPDS, url, "Проверяю OPDS...");
 }
 
 static bool parse_search_page(char *text) {
@@ -535,8 +475,8 @@ static bool parse_search_page(char *text) {
             entries_count < MAX_ENTRIES
         ) {
             BookEntry *book = &entries[entries_count];
-            memset(book, 0, sizeof(BookEntry));
 
+            memset(book, 0, sizeof(BookEntry));
             percent_decode(fields[1], book->title, sizeof(book->title));
             percent_decode(fields[2], book->author, sizeof(book->author));
             percent_decode(fields[3], book->url, sizeof(book->url));
@@ -569,75 +509,22 @@ static bool parse_search_page(char *text) {
     return got_books;
 }
 
-static bool load_search_page(const char *url, const char *message) {
-    char *text;
-    bool result;
-
-    if (message) show_progress(message);
-
-    text = http_get_text(url, 90);
-    if (!text) return false;
-
-    result = parse_search_page(text);
-    free(text);
-    return result;
-}
-
-static void do_search() {
-    char query[1024];
-    char url[URL_LEN];
-
-    if (!search_text[0] || !ensure_user()) return;
-
-    clear_entries();
+static void do_search(void) {
+    char query[1024], url[URL_LEN];
+    if (!search_text[0] || !ensure_user() || text_job.active) return;
     url_encode(search_text, query, sizeof(query));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/search?uid=%s&query=%s&plain=1",
-        server_url,
-        user_uid,
-        query
-    );
-
-    if (!load_search_page(url, "Поиск...")) {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Ничего не найдено или сервер недоступен",
-            3000
-        );
-        return;
-    }
-
-    app_mode = MODE_RESULTS;
-    current_page = 0;
+    snprintf(url, sizeof(url), "%s/search?uid=%s&query=%s&plain=1",
+             server_url, user_uid, query);
+    request_text(REQ_SEARCH, url, "Поиск...");
 }
-
-static bool load_next_page() {
-    char query[1024];
-    char page[6144];
-    char url[URL_LEN];
-    int old_count = entries_count;
-
-    if (!next_page_url[0]) return false;
-
+static bool load_next_page(void) {
+    char query[1024], page[6144], url[URL_LEN];
+    if (!next_page_url[0] || text_job.active) return false;
     url_encode(search_text, query, sizeof(query));
     url_encode(next_page_url, page, sizeof(page));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/search?uid=%s&query=%s&page_url=%s&plain=1",
-        server_url,
-        user_uid,
-        query,
-        page
-    );
-
-    if (!load_search_page(url, "Следующая страница...")) return false;
-    return entries_count > old_count;
+    snprintf(url, sizeof(url), "%s/search?uid=%s&query=%s&page_url=%s&plain=1",
+             server_url, user_uid, query, page);
+    return request_text(REQ_NEXT, url, "Следующая страница...");
 }
 
 static bool file_is_epub(const char *path, long *size_out) {
@@ -656,15 +543,10 @@ static bool file_is_epub(const char *path, long *size_out) {
         return false;
     }
 
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return false;
-    }
-
-    size = ftell(file);
     fclose(file);
+    size = file_size(path);
 
-    if (size_out && size > 0) *size_out = size;
+    if (size_out) *size_out = size;
 
     return (
         size > 2 &&
@@ -678,6 +560,7 @@ static void set_transport_error(
     const char *error
 ) {
     if (!result) return;
+
     safe_copy(
         result->error,
         error ? error : "unknown",
@@ -685,202 +568,671 @@ static void set_transport_error(
     );
 }
 
-static bool download_to_temp_file(
-    const char *url,
-    const char *tmp_path,
-    DownloadTransportResult *result
-) {
-    int session;
-    int start_result;
-    int status = NET_OK;
+/* No client download telemetry in BookFerry 3.0. */
+
+static void close_download_session(bool abort_first) {
+    if (download_state.session < 0) return;
+
+    if (abort_first) {
+        AbortTransfer(download_state.session);
+    }
+
+    CloseSession(download_state.session);
+    download_state.session = -1;
+}
+
+static void cleanup_download_parts(void) {
+    int i;
+    char path[560];
+
+    for (i = 1; i <= DOWNLOAD_ATTEMPTS; i++) {
+        snprintf(
+            path,
+            sizeof(path),
+            "%s.part%d",
+            download_state.filepath,
+            i
+        );
+        remove(path);
+    }
+}
+
+static void prepare_download_tmp_path(void) {
+    snprintf(
+        download_state.tmp_path,
+        sizeof(download_state.tmp_path),
+        "%s.part%d",
+        download_state.filepath,
+        download_state.attempt
+    );
+}
+
+static bool start_download_attempt(void) {
     iv_sessioninfo *info;
-    time_t started;
-    bool completed = false;
+    int start_result;
 
-    if (!url || !url[0] || !tmp_path || !tmp_path[0] || !result) {
+    prepare_download_tmp_path();
+    remove(download_state.tmp_path);
+
+    memset(&download_state.transport, 0, sizeof(download_state.transport));
+    download_state.transport.net_status = NET_OK;
+    safe_copy(
+        download_state.transport.error,
+        "unknown",
+        sizeof(download_state.transport.error)
+    );
+
+    download_state.total_bytes = 0;
+    download_state.percent = -1;
+    download_state.last_draw_percent_bucket = -1;
+    download_state.attempt_started_ms = now_ms();
+
+    download_state.session = NewSession();
+    if (download_state.session < 0) {
+        set_transport_error(
+            &download_state.transport,
+            "new_session_failed"
+        );
         return false;
     }
 
-    memset(result, 0, sizeof(*result));
-    result->net_status = NET_OK;
-    safe_copy(result->error, "unknown", sizeof(result->error));
-
-    remove(tmp_path);
-
-    session = NewSession();
-    if (session < 0) {
-        set_transport_error(result, "new_session_failed");
-        return false;
+    info = GetSessionInfo(download_state.session);
+    if (info) {
+        info->response = 0;
     }
-
-    info = GetSessionInfo(session);
-    if (info) info->response = 0;
 
     start_result = DownloadTo(
-        session,
-        url,
+        download_state.session,
+        download_state.request_url,
         NULL,
-        tmp_path,
+        download_state.tmp_path,
         DOWNLOAD_SESSION_TIMEOUT
     );
 
-    if (start_result != 0) {
-        set_transport_error(result, "download_start_failed");
-        CloseSession(session);
-        remove(tmp_path);
+    if (start_result != NET_OK) {
+        char error[64];
+
+        download_state.transport.net_status = start_result;
+        snprintf(
+            error,
+            sizeof(error),
+            "download_start_%d",
+            start_result
+        );
+        set_transport_error(&download_state.transport, error);
+        close_download_session(false);
+        remove(download_state.tmp_path);
         return false;
     }
 
-    started = time(NULL);
+    safe_copy(
+        download_state.status,
+        download_state.attempt == 1
+            ? "Подключение к серверу..."
+            : "Повторная попытка...",
+        sizeof(download_state.status)
+    );
 
-    while ((time(NULL) - started) < DOWNLOAD_TOTAL_TIMEOUT) {
-        status = GetSessionStatus(session);
-        result->net_status = status;
-        info = GetSessionInfo(session);
+    return true;
+}
 
-        if (info) {
-            result->http_status = (int)info->response;
-            if (info->progress >= 0) {
-                result->bytes = info->progress;
+static bool download_should_retry(void) {
+    if (download_state.attempt >= DOWNLOAD_ATTEMPTS) return false;
+
+    if (
+        download_state.transport.http_status >= 400 &&
+        download_state.transport.http_status < 500
+    ) {
+        return false;
+    }
+
+    if (
+        strcmp(download_state.transport.error, "cancelled_by_user") == 0
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+#define BOOKFERRY_SCAN_DIR "/mnt/ext1/BookFerryDiag"
+#define BOOKFERRY_SCAN_LOG BOOKFERRY_SCAN_DIR "/bookferry-scanner.log"
+#define BOOKFERRY_SCAN_OUTPUT BOOKFERRY_SCAN_DIR "/bookferry-scanner-output.log"
+#define BOOKFERRY_SCANNER "/ebrmain/bin/scanner.app"
+
+static void scanner_log(const char *event, const char *path, long value) {
+    FILE *log;
+    time_t now = time(NULL);
+    mkdir(BOOKFERRY_SCAN_DIR, 0755);
+    log = fopen(BOOKFERRY_SCAN_LOG, "a");
+    if (!log) return;
+    fprintf(log, "%ld %s path=%s value=%ld\n",
+            (long)now, event, path ? path : "-", value);
+    fclose(log);
+}
+
+static void notify_library_scanner(const char *path) {
+    pid_t child;
+    FILE *output_file;
+    if (scanner_child > 0) {
+        scanner_log("scanner_already_running", path, (long)scanner_child);
+        return;
+    }
+    output_file = fopen(BOOKFERRY_SCAN_OUTPUT, "ab");
+    if (output_file) {
+        if (fseek(output_file, 0, SEEK_END) == 0)
+            scanner_output_offset = ftell(output_file);
+        else
+            scanner_output_offset = 0;
+        fclose(output_file);
+    } else {
+        scanner_output_offset = 0;
+    }
+    if (access(BOOKFERRY_SCANNER, X_OK) != 0) {
+        scanner_log("scanner_missing_errno", path, errno);
+        return;
+    }
+    scanner_log("scanner_launch_requested", path, 0);
+    fflush(NULL);
+    child = fork();
+    if (child < 0) {
+        scanner_log("fork_failed_errno", path, errno);
+        return;
+    }
+    if (child == 0) {
+        int fd = open(BOOKFERRY_SCAN_OUTPUT, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+        execl(BOOKFERRY_SCANNER, BOOKFERRY_SCANNER, (char *)NULL);
+        dprintf(STDERR_FILENO, "BookFerry scanner exec failed: errno=%d\n", errno);
+        _exit(127);
+    }
+    scanner_log("scanner_forked_pid", path, (long)child);
+    scanner_child = child;
+    scanner_started_ms = now_ms();
+    scanner_finished_ms = 0;
+    scanner_term_ms = 0;
+    ClearTimer(scanner_poll);
+    SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
+}
+
+static void cancel_text(void) {
+    ClearTimer(text_poll);
+    if (text_job.session >= 0) {
+        AbortTransfer(text_job.session);
+        CloseSession(text_job.session);
+    }
+    text_job.session = -1;
+    text_job.active = false;
+    text_job.kind = REQ_NONE;
+    remove(TEXT_FILE);
+}
+
+static bool request_text(RequestKind kind, const char *url, const char *label) {
+    int session, result;
+    if (text_job.active || download_state.active) return false;
+    scanner_log("request_start", NULL, (long)kind);
+    session = NewSession();
+    if (session < 0) {
+        scanner_log("request_session_failed", NULL, session);
+        return false;
+    }
+    remove(TEXT_FILE);
+    result = DownloadTo(session, url, NULL, TEXT_FILE, 30);
+    if (result != NET_OK) {
+        scanner_log("request_start_failed", NULL, result);
+        CloseSession(session);
+        return false;
+    }
+    text_job.session = session;
+    text_job.active = true;
+    text_job.kind = kind;
+    text_job.started_ms = now_ms();
+    if (label) show_progress(label);
+    SetWeakTimer("bookferry_text", text_poll, TEXT_POLL_MS);
+    return true;
+}
+
+static void text_poll(void) {
+    int status;
+    long response = 0;
+    iv_sessioninfo *info;
+    bool ok = false;
+    RequestKind kind;
+    char *body = NULL;
+    if (!text_job.active || text_job.session < 0) return;
+    status = GetSessionStatus(text_job.session);
+    info = GetSessionInfo(text_job.session);
+    if (info) response = info->response;
+    if (status >= 0 && !(status == NET_OK && response != 0) &&
+        now_ms() - text_job.started_ms < TEXT_TIMEOUT_MS) {
+        SetWeakTimer("bookferry_text", text_poll, TEXT_POLL_MS);
+        return;
+    }
+
+    kind = text_job.kind;
+    if (status == NET_OK && response >= 200 && response < 300) {
+        CloseSession(text_job.session);
+        text_job.session = -1;
+        body = read_text_file(TEXT_FILE);
+    } else {
+        AbortTransfer(text_job.session);
+        CloseSession(text_job.session);
+        text_job.session = -1;
+    }
+    text_job.active = false;
+    text_job.kind = REQ_NONE;
+    remove(TEXT_FILE);
+
+    if (body) {
+        switch (kind) {
+        case REQ_REGISTER: ok = parse_register(body); break;
+        case REQ_PROFILE: ok = parse_profile(body); break;
+        case REQ_CATALOGS: ok = parse_catalogs(body); break;
+        case REQ_SELECT_CATALOG: ok = parse_selection(body, false); break;
+        case REQ_SELECT_OPDS: ok = parse_selection(body, true); break;
+        case REQ_SEARCH:
+            clear_entries();
+            ok = parse_search_page(body);
+            if (ok) { app_mode = MODE_RESULTS; current_page = 0; }
+            break;
+        case REQ_NEXT:
+            ok = parse_search_page(body);
+            break;
+        default: break;
+        }
+        free(body);
+    }
+    scanner_log(ok ? "request_success" : "request_failed", NULL, (long)kind);
+    if (ok && kind == REQ_CATALOGS) app_mode = MODE_CATALOGS;
+    if (ok && kind == REQ_NEXT) current_page++;
+    if (ok && (kind == REQ_SELECT_CATALOG || kind == REQ_SELECT_OPDS))
+        app_mode = MODE_HOME;
+    if (!ok && kind != REQ_PROFILE)
+        Message(ICON_ERROR, "BookFerry", "Запрос не выполнен", 2500);
+    draw_screen();
+}
+
+static void scanner_poll(void) {
+    int status = 0;
+    pid_t result;
+    FILE *output;
+    char line[512];
+    long long now;
+
+    if (scanner_child <= 0) return;
+
+    // Never signal an unrelated PID: waitpid() establishes whether our
+    // scanner child is still alive before kill() can be used.
+    result = waitpid(scanner_child, &status, WNOHANG);
+    if (result == scanner_child) {
+        scanner_log("scanner_reaped", NULL, (long)status);
+        scanner_child = -1;
+        return;
+    }
+    if (result < 0) {
+        scanner_log("scanner_waitpid_errno", NULL, (long)errno);
+        scanner_child = -1;
+        return;
+    }
+
+    now = now_ms();
+    output = fopen(BOOKFERRY_SCAN_OUTPUT, "rb");
+    if (output) {
+        if (fseek(output, scanner_output_offset, SEEK_SET) == 0) {
+            while (fgets(line, sizeof(line), output)) {
+                if (!scanner_finished_ms && strstr(line, "Scan finished")) {
+                    scanner_finished_ms = now;
+                    scanner_log("scanner_scan_finished", NULL, (long)scanner_child);
+                }
+            }
+            {
+                long next = ftell(output);
+                if (next >= 0) scanner_output_offset = next;
             }
         }
+        fclose(output);
+    }
 
-        if (status < 0) {
-            char error[64];
-            snprintf(error, sizeof(error), "network_%d", status);
-            set_transport_error(result, error);
-            break;
+    if (!scanner_term_ms &&
+        ((scanner_finished_ms && now - scanner_finished_ms >= SCANNER_GRACE_MS) ||
+         (now - scanner_started_ms >= SCANNER_MAX_RUNTIME_MS))) {
+        scanner_log("scanner_sigterm", NULL, (long)scanner_child);
+        if (kill(scanner_child, SIGTERM) == 0) scanner_term_ms = now;
+        else scanner_log("scanner_sigterm_errno", NULL, (long)errno);
+    } else if (scanner_term_ms &&
+               now - scanner_term_ms >= SCANNER_TERM_GRACE_MS) {
+        scanner_log("scanner_sigkill", NULL, (long)scanner_child);
+        if (kill(scanner_child, SIGKILL) == 0)
+            scanner_term_ms = now; // do not spin or spam while being reaped
+        else
+            scanner_log("scanner_sigkill_errno", NULL, (long)errno);
+    }
+    SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
+}
+
+static void finish_download(bool success, const char *user_message) {
+    int return_mode;
+
+    // No asynchronous transfer or telemetry may survive a terminal
+    // download result (success, final failure, or user cancellation).
+    ClearTimer(download_poll_timer);
+
+    // The active transfer has normally completed, but some error paths
+    // still have a session. Abort it to avoid background network activity.
+    close_download_session(true);
+
+    return_mode = download_state.return_mode;
+    cleanup_download_parts();
+
+    scanner_log(
+        success ? "download_success_cleanup" : "download_error_cleanup",
+        download_state.filepath,
+        (long)download_state.attempt
+    );
+
+    memset(&download_state, 0, sizeof(download_state));
+    download_state.session = -1;
+    app_mode = return_mode;
+    draw_screen();
+
+    Message(
+        success || strcmp(user_message ? user_message : "", "Загрузка отменена") == 0
+            ? ICON_INFORMATION : ICON_ERROR,
+        "BookFerry",
+        user_message
+            ? user_message
+            : (success ? "EPUB скачан в папку Books" : "Не удалось скачать EPUB"),
+        success ? 2200 : 3000
+    );
+
+    // Intentionally do not launch /download/client-result here:
+    // it created another asynchronous session after the download ended.
+}
+
+static void retry_or_finish_download(void) {
+    close_download_session(false);
+    remove(download_state.tmp_path);
+
+    if (download_should_retry()) {
+        download_state.attempt++;
+
+        safe_copy(
+            download_state.status,
+            "Повторная попытка...",
+            sizeof(download_state.status)
+        );
+        draw_screen();
+
+        if (start_download_attempt()) {
+            SetWeakTimer(
+                "bookferry_download",
+                download_poll_timer,
+                DOWNLOAD_POLL_MS
+            );
+            return;
         }
 
-        if (info && info->response != 0) {
-            if (info->response >= 200 && info->response < 300) {
-                completed = true;
-            } else {
-                char error[64];
-                snprintf(
-                    error,
-                    sizeof(error),
-                    "http_%ld",
-                    info->response
+        retry_or_finish_download();
+        return;
+    }
+
+    finish_download(false, NULL);
+}
+
+static void download_poll_timer(void) {
+    int status;
+    iv_sessioninfo *info;
+    long bytes;
+    long long now;
+    bool redraw = false;
+    int percent_bucket = -1;
+
+    if (!download_state.active || download_state.session < 0) return;
+
+    now = now_ms();
+    status = GetSessionStatus(download_state.session);
+    info = GetSessionInfo(download_state.session);
+    bytes = file_size(download_state.tmp_path);
+
+    download_state.transport.net_status = status;
+    download_state.transport.bytes = bytes;
+
+    if (info) {
+        download_state.transport.http_status = (int)info->response;
+
+        if (info->length > 0) {
+            download_state.total_bytes = (long)info->length;
+        }
+    }
+
+    if (download_state.total_bytes > 0) {
+        long long raw_percent =
+            ((long long)bytes * 100LL) /
+            (long long)download_state.total_bytes;
+
+        if (raw_percent < 0) raw_percent = 0;
+        if (raw_percent > 100) raw_percent = 100;
+        download_state.percent = (int)raw_percent;
+        percent_bucket = download_state.percent / 5;
+    } else {
+        download_state.percent = -1;
+    }
+
+    if (status < 0) {
+        char error[64];
+
+        snprintf(error, sizeof(error), "network_%d", status);
+        set_transport_error(&download_state.transport, error);
+        retry_or_finish_download();
+        return;
+    }
+
+    if (
+        info &&
+        info->response >= 400
+    ) {
+        char error[64];
+
+        snprintf(
+            error,
+            sizeof(error),
+            "http_%ld",
+            info->response
+        );
+        set_transport_error(&download_state.transport, error);
+        retry_or_finish_download();
+        return;
+    }
+
+    if (
+        status == NET_OK &&
+        info &&
+        info->response != 0
+    ) {
+        if (info->response >= 200 && info->response < 300) {
+            long final_size = 0;
+
+            close_download_session(false);
+
+            if (!file_is_epub(download_state.tmp_path, &final_size)) {
+                download_state.transport.bytes = final_size;
+                set_transport_error(
+                    &download_state.transport,
+                    "invalid_epub"
                 );
-                set_transport_error(result, error);
+                retry_or_finish_download();
+                return;
             }
-            break;
+
+            download_state.transport.bytes = final_size;
+            download_state.transport.net_status = NET_OK;
+            download_state.transport.error[0] = '\0';
+
+            if (
+                rename(
+                    download_state.tmp_path,
+                    download_state.filepath
+                ) != 0
+            ) {
+                set_transport_error(
+                    &download_state.transport,
+                    "rename_failed"
+                );
+                remove(download_state.tmp_path);
+                retry_or_finish_download();
+                return;
+            }
+
+            // Notify InkView after the validated EPUB has its final path.
+            // Firmware determines whether this indexes the new book.
+            BookReady(download_state.filepath);
+            // Match the working diagnostics utility: fork + direct exec.
+            // Capture scanner startup and output on the reader for analysis.
+            // Diagnostic A/B: do not start scanner.app from BookFerry.
+            // Keep BookReady() to test whether scanner launch triggers
+            // the input freeze after downloading a book.
+            notify_library_scanner(download_state.filepath);
+            finish_download(true, "EPUB скачан в папку Books");
+            return;
         }
 
-        GoSleep(250, 1);
+        {
+            char error[64];
+
+            snprintf(
+                error,
+                sizeof(error),
+                "http_%ld",
+                info->response
+            );
+            set_transport_error(&download_state.transport, error);
+            retry_or_finish_download();
+            return;
+        }
     }
 
-    CloseSession(session);
-
-    if (!completed && strcmp(result->error, "unknown") == 0) {
-        set_transport_error(result, "transport_timeout");
+    if (
+        now - download_state.attempt_started_ms >=
+        DOWNLOAD_TOTAL_TIMEOUT_MS
+    ) {
+        set_transport_error(
+            &download_state.transport,
+            "transport_timeout"
+        );
+        download_state.transport.net_status = NET_ETIMEOUT;
+        close_download_session(true);
+        retry_or_finish_download();
+        return;
     }
 
-    if (completed) {
-        long file_size = 0;
-
-        if (!file_is_epub(tmp_path, &file_size)) {
-            set_transport_error(result, "invalid_epub");
-            result->bytes = file_size;
-            completed = false;
+    if (status == NET_CONNECT) {
+        safe_copy(
+            download_state.status,
+            "Подключение к серверу...",
+            sizeof(download_state.status)
+        );
+    } else if (status == NET_TRANSFER) {
+        if (download_state.percent >= 0) {
+            snprintf(
+                download_state.status,
+                sizeof(download_state.status),
+                "Скачивание: %d%%",
+                download_state.percent
+            );
+        } else if (bytes > 0) {
+            snprintf(
+                download_state.status,
+                sizeof(download_state.status),
+                "Скачивание: %ld КБ",
+                bytes / 1024L
+            );
         } else {
-            result->bytes = file_size;
-            result->error[0] = '\0';
+            safe_copy(
+                download_state.status,
+                "Получение EPUB...",
+                sizeof(download_state.status)
+            );
         }
+    } else if (info && info->response >= 200 && info->response < 300) {
+        safe_copy(
+            download_state.status,
+            "Завершение загрузки...",
+            sizeof(download_state.status)
+        );
+    } else {
+        safe_copy(
+            download_state.status,
+            "Ожидание ответа...",
+            sizeof(download_state.status)
+        );
     }
 
-    if (!completed) {
-        remove(tmp_path);
+    if (
+        now - download_state.last_draw_ms >= DOWNLOAD_REDRAW_MS
+    ) {
+        redraw = true;
     }
 
-    return completed;
+    if (
+        percent_bucket >= 0 &&
+        percent_bucket != download_state.last_draw_percent_bucket
+    ) {
+        redraw = true;
+    }
+
+    if (redraw) {
+        download_state.last_draw_ms = now;
+        download_state.last_draw_percent_bucket = percent_bucket;
+        draw_screen();
+    }
+
+    SetWeakTimer(
+        "bookferry_download",
+        download_poll_timer,
+        DOWNLOAD_POLL_MS
+    );
 }
 
-static void report_download_client_result(
-    const BookEntry *book,
-    const char *status,
-    long bytes,
-    int attempts,
-    long duration_ms,
-    int http_status,
-    int net_status,
-    const char *error
-) {
-    char encoded_title[1024];
-    char encoded_error[512];
-    char report_url[URL_LEN];
-    char *response;
-
-    if (!user_uid[0] || !status || !status[0]) return;
-
-    url_encode(
-        book && book->title[0] ? book->title : "-",
-        encoded_title,
-        sizeof(encoded_title)
-    );
-    url_encode(
-        error && error[0] ? error : "-",
-        encoded_error,
-        sizeof(encoded_error)
-    );
-
-    snprintf(
-        report_url,
-        sizeof(report_url),
-        "%s/download/client-result"
-        "?uid=%s"
-        "&status=%s"
-        "&bytes=%ld"
-        "&attempts=%d"
-        "&duration_ms=%ld"
-        "&http_status=%d"
-        "&net_status=%d"
-        "&title=%s"
-        "&error=%s",
-        server_url,
-        user_uid,
-        status,
-        bytes,
-        attempts,
-        duration_ms,
-        http_status,
-        net_status,
-        encoded_title,
-        encoded_error
-    );
-
-    response = http_get_text(report_url, DOWNLOAD_REPORT_TIMEOUT);
-    if (response) free(response);
-}
-
-static void download_book_to_device(BookEntry *book) {
+static void start_download(BookEntry *book) {
     char encoded_url[6144];
-    char url[URL_LEN];
     char filename[256];
-    char filepath[512];
-    char tmp_path[560];
-    char stale_tmp[560];
-    DownloadTransportResult transport;
-    int attempt;
-    int i;
-    bool success = false;
-    time_t started;
 
-    if (!book || !book->url[0] || !user_uid[0]) return;
+    if (
+        !book ||
+        !book->url[0] ||
+        !user_uid[0] ||
+        download_state.active
+    ) {
+        return;
+    }
+
+    memset(&download_state, 0, sizeof(download_state));
+    download_state.session = -1;
+    download_state.active = true;
+    download_state.return_mode = app_mode;
+    download_state.attempt = 1;
+    download_state.started_ms = now_ms();
+    download_state.last_draw_ms = 0;
+    download_state.percent = -1;
+    download_state.last_draw_percent_bucket = -1;
+    download_state.book = *book;
 
     url_encode(book->url, encoded_url, sizeof(encoded_url));
 
     snprintf(
-        url,
-        sizeof(url),
+        download_state.request_url,
+        sizeof(download_state.request_url),
         "%s/download?uid=%s&url=%s",
         server_url,
         user_uid,
         encoded_url
     );
 
-    system("mkdir -p " BOOKS_DIR);
+    mkdir(BOOKS_DIR, 0755);
 
     snprintf(
         filename,
@@ -891,102 +1243,57 @@ static void download_book_to_device(BookEntry *book) {
     );
     sanitize_filename(filename);
     truncate_utf8(filename, 220);
-    strncat(filename, ".epub", sizeof(filename) - strlen(filename) - 1);
+    strncat(
+        filename,
+        ".epub",
+        sizeof(filename) - strlen(filename) - 1
+    );
 
     snprintf(
-        filepath,
-        sizeof(filepath),
+        download_state.filepath,
+        sizeof(download_state.filepath),
         BOOKS_DIR "/%s",
         filename
     );
 
-    memset(&transport, 0, sizeof(transport));
-    started = time(NULL);
+    cleanup_download_parts();
 
-    for (attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
-        snprintf(
-            tmp_path,
-            sizeof(tmp_path),
-            "%s.part%d",
-            filepath,
-            attempt
-        );
+    safe_copy(
+        download_state.status,
+        "Подготовка загрузки...",
+        sizeof(download_state.status)
+    );
 
-        show_progress(
-            attempt == 1
-                ? "Скачивание EPUB..."
-                : "Повтор загрузки..."
-        );
+    app_mode = MODE_DOWNLOAD;
+    draw_screen();
 
-        if (download_to_temp_file(url, tmp_path, &transport)) {
-            if (rename(tmp_path, filepath) == 0) {
-                success = true;
-                break;
-            }
-
-            set_transport_error(&transport, "rename_failed");
-            remove(tmp_path);
-        }
-
-        if (
-            transport.http_status >= 400 &&
-            transport.http_status < 500
-        ) {
-            break;
-        }
-    }
-
-    for (i = 1; i <= DOWNLOAD_ATTEMPTS; i++) {
-        snprintf(
-            stale_tmp,
-            sizeof(stale_tmp),
-            "%s.part%d",
-            filepath,
-            i
-        );
-        remove(stale_tmp);
-    }
-
-    if (success) {
-        report_download_client_result(
-            book,
-            "success",
-            transport.bytes,
-            attempt,
-            (long)(time(NULL) - started) * 1000L,
-            transport.http_status,
-            transport.net_status,
-            NULL
-        );
-
-        Message(
-            ICON_INFORMATION,
-            "BookFerry",
-            "EPUB скачан в папку Books",
-            2200
-        );
+    if (!start_download_attempt()) {
+        retry_or_finish_download();
         return;
     }
 
-    report_download_client_result(
-        book,
-        "error",
-        transport.bytes,
-        attempt > DOWNLOAD_ATTEMPTS
-            ? DOWNLOAD_ATTEMPTS
-            : attempt,
-        (long)(time(NULL) - started) * 1000L,
-        transport.http_status,
-        transport.net_status,
-        transport.error
+    SetWeakTimer(
+        "bookferry_download",
+        download_poll_timer,
+        DOWNLOAD_POLL_MS
+    );
+}
+
+static void cancel_download(void) {
+    if (!download_state.active) return;
+
+    ClearTimer(download_poll_timer);
+
+    download_state.transport.bytes = file_size(download_state.tmp_path);
+    download_state.transport.net_status = NET_ABORTED;
+    set_transport_error(
+        &download_state.transport,
+        "cancelled_by_user"
     );
 
-    Message(
-        ICON_ERROR,
-        "BookFerry",
-        "Не удалось скачать EPUB",
-        3000
-    );
+    close_download_session(true);
+    remove(download_state.tmp_path);
+    finish_download(false, "Загрузка отменена");
 }
 
 static void draw_nav(
@@ -1020,7 +1327,102 @@ static void draw_nav(
     );
 }
 
-static void draw_screen() {
+static void draw_download_screen(
+    int x,
+    int width,
+    int button_h,
+    int spacing
+) {
+    int y = main_rect.y + spacing;
+    int bar_y;
+    int bar_h = main_rect.h * 5 / 100;
+    int cancel_y = main_rect.y + main_rect.h - button_h;
+    char attempt_text[64];
+    char bytes_text[96];
+    char elapsed_text[96];
+    long long elapsed_ms = now_ms() - download_state.started_ms;
+
+    DrawString(x, y, "Скачивание EPUB");
+    y += font->height * 2;
+
+    DrawString(x, y, download_state.book.title);
+    y += font->height + 10;
+    DrawString(x, y, download_state.book.author);
+    y += font->height * 2;
+
+    DrawString(x, y, download_state.status);
+    y += font->height + 16;
+
+    snprintf(
+        attempt_text,
+        sizeof(attempt_text),
+        "Попытка: %d/%d",
+        download_state.attempt,
+        DOWNLOAD_ATTEMPTS
+    );
+    DrawString(x, y, attempt_text);
+    y += font->height + 10;
+
+    if (download_state.transport.bytes > 0) {
+        if (download_state.total_bytes > 0) {
+            snprintf(
+                bytes_text,
+                sizeof(bytes_text),
+                "%ld / %ld КБ",
+                download_state.transport.bytes / 1024L,
+                download_state.total_bytes / 1024L
+            );
+        } else {
+            snprintf(
+                bytes_text,
+                sizeof(bytes_text),
+                "Получено: %ld КБ",
+                download_state.transport.bytes / 1024L
+            );
+        }
+    } else {
+        safe_copy(bytes_text, "Получено: 0 КБ", sizeof(bytes_text));
+    }
+
+    DrawString(x, y, bytes_text);
+    y += font->height + 10;
+
+    snprintf(
+        elapsed_text,
+        sizeof(elapsed_text),
+        "Время: %lld сек",
+        elapsed_ms / 1000LL
+    );
+    DrawString(x, y, elapsed_text);
+    y += font->height + 16;
+
+    bar_y = y;
+    DrawRect(x, bar_y, width, bar_h, BLACK);
+
+    if (download_state.percent > 0) {
+        int fill_w =
+            (width - 4) * download_state.percent / 100;
+
+        if (fill_w > 0) {
+            FillArea(
+                x + 2,
+                bar_y + 2,
+                fill_w,
+                bar_h - 4,
+                BLACK
+            );
+        }
+    }
+
+    DrawRect(x, cancel_y, width, button_h, BLACK);
+    DrawString(
+        x + (width - StringWidth("Отмена")) / 2,
+        cancel_y + (button_h - font->height) / 2,
+        "Отмена"
+    );
+}
+
+static void draw_screen(void) {
     int side = main_rect.w * 5 / 100;
     int x = main_rect.x + side;
     int width = main_rect.w - side * 2;
@@ -1034,16 +1436,32 @@ static void draw_screen() {
 
     if (app_mode == MODE_HOME) {
         int about_y = main_rect.y + main_rect.h - button_h - spacing;
-        int refresh_y = about_y - button_h - spacing;
+        int exit_y = about_y - button_h - spacing;
 
         DrawRect(x, y, width, input_h, BLACK);
-        DrawString(x + 20, y + input_h / 4 - font->height / 2, "Библиотека:");
-        DrawString(x + 20, y + input_h * 3 / 4 - font->height / 2, catalog_name);
+        DrawString(
+            x + 20,
+            y + input_h / 4 - font->height / 2,
+            "Библиотека:"
+        );
+        DrawString(
+            x + 20,
+            y + input_h * 3 / 4 - font->height / 2,
+            catalog_name
+        );
         y += input_h + spacing;
 
         DrawRect(x, y, width, input_h, BLACK);
-        DrawString(x + 20, y + input_h / 4 - font->height / 2, "Название или автор:");
-        DrawString(x + 20, y + input_h * 3 / 4 - font->height / 2, search_text);
+        DrawString(
+            x + 20,
+            y + input_h / 4 - font->height / 2,
+            "Название или автор:"
+        );
+        DrawString(
+            x + 20,
+            y + input_h * 3 / 4 - font->height / 2,
+            search_text
+        );
         y += input_h + spacing;
 
         DrawRect(x, y, width, button_h, BLACK);
@@ -1053,11 +1471,11 @@ static void draw_screen() {
             ">>> НАЧАТЬ ПОИСК <<<"
         );
 
-        DrawRect(x, refresh_y, width, button_h, BLACK);
+        DrawRect(x, exit_y, width, button_h, BLACK);
         DrawString(
-            x + (width - StringWidth("[ Обн. библиотеку ]")) / 2,
-            refresh_y + (button_h - font->height) / 2,
-            "[ Обн. библиотеку ]"
+            x + (width - StringWidth("[ Выход ]")) / 2,
+            exit_y + (button_h - font->height) / 2,
+            "[ Выход ]"
         );
 
         DrawRect(x, about_y, width, button_h, BLACK);
@@ -1098,7 +1516,9 @@ static void draw_screen() {
             y += item_h;
         }
 
-        total_pages = (entries_count + ITEMS_PER_PAGE - 1) / ITEMS_PER_PAGE;
+        total_pages =
+            (entries_count + ITEMS_PER_PAGE - 1) /
+            ITEMS_PER_PAGE;
         if (total_pages < 1) total_pages = 1;
 
         snprintf(
@@ -1114,7 +1534,8 @@ static void draw_screen() {
 
         DrawString(
             x,
-            main_rect.y + main_rect.h - button_h - font->height - 25,
+            main_rect.y + main_rect.h -
+                button_h - font->height - 25,
             status
         );
         draw_nav(x, width, button_h, spacing);
@@ -1149,9 +1570,11 @@ static void draw_screen() {
 
         DrawString(x, y, "BookFerry для PocketBook");
         y += font->height * 2;
-        DrawString(x, y, "Версия: 2.0");
+        DrawString(x, y, "Версия: 3.0");
         y += font->height + 10;
         DrawString(x, y, "Поиск через сервер BookFerry");
+        y += font->height + 10;
+        DrawString(x, y, "Асинхронная загрузка EPUB");
         y += font->height + 10;
         DrawString(x, y, "Кирилл Т");
         y += font->height + 10;
@@ -1163,14 +1586,46 @@ static void draw_screen() {
             back_y + (button_h - font->height) / 2,
             "Назад"
         );
+    } else if (app_mode == MODE_DOWNLOAD) {
+        draw_download_screen(x, width, button_h, spacing);
     }
 
+    if (text_job.active) {
+        int box_w = main_rect.w * 70 / 100;
+        int box_h = font->height * 3;
+        int box_x = main_rect.x + (main_rect.w - box_w) / 2;
+        int box_y = main_rect.y + (main_rect.h - box_h) / 2;
+        FillArea(box_x, box_y, box_w, box_h, WHITE);
+        DrawRect(box_x, box_y, box_w, box_h, BLACK);
+        DrawString(box_x + 20, box_y + font->height, "Запрос к серверу...");
+    }
     FullUpdate();
 }
 
-static void keyboard_search_handler(char *text) {
-    if (text) safe_copy(search_text, text, sizeof(search_text));
+static void deferred_keyboard_search(void) {
+    scanner_log("keyboard_search_timer_fired", NULL, 0);
+    if (!search_text[0]) return;
+    scanner_log("keyboard_search_begin", NULL, 0);
+    do_search();
+    scanner_log("keyboard_search_done", NULL, 0);
     draw_screen();
+}
+
+static void keyboard_search_handler(char *text) {
+    scanner_log("keyboard_callback", NULL, text ? (long)strlen(text) : -1L);
+    if (text) {
+        safe_copy(search_text, text, sizeof(search_text));
+    }
+    // Keyboard is still being dismissed; redraw on the next event turn.
+    // Do not start an HTTP operation from inside its callback.
+    // Return to InkView first and start the search on the next event turn.
+    if (text && search_text[0]) {
+        ClearTimer(deferred_keyboard_search);
+        SetWeakTimer("bookferry_keyboard_search", deferred_keyboard_search, 150);
+        scanner_log("keyboard_search_scheduled", NULL, 150);
+    } else {
+        draw_screen();
+    }
 }
 
 static void keyboard_opds_handler(char *text) {
@@ -1179,18 +1634,8 @@ static void keyboard_opds_handler(char *text) {
         return;
     }
 
-    if (select_custom_opds(text)) {
-        Message(ICON_INFORMATION, "BookFerry", "OPDS подключён", 1800);
-        app_mode = MODE_HOME;
-    } else {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Не удалось подключить OPDS",
-            3000
-        );
-    }
-
+    if (!select_custom_opds(text))
+        Message(ICON_ERROR, "BookFerry", "Не удалось начать запрос OPDS", 2400);
     draw_screen();
 }
 
@@ -1202,29 +1647,32 @@ static void handle_tap(int px, int py) {
     int button_h = main_rect.h * 9 / 100;
     int spacing = main_rect.h * 3 / 100;
 
-    if (time(NULL) - last_tap_time < 1) return;
-    last_tap_time = time(NULL);
+    if (app_mode == MODE_DOWNLOAD) {
+        int cancel_y = main_rect.y + main_rect.h - button_h;
+
+        if (
+            px >= x && px <= x + width &&
+            py >= cancel_y && py <= cancel_y + button_h
+        ) {
+            cancel_download();
+        }
+        return;
+    }
+
+    if (now_ms() - last_tap_ms < 250) return;
+    last_tap_ms = now_ms();
+    if (text_job.active) return;
 
     if (app_mode == MODE_HOME) {
         int y = main_rect.y + spacing;
         int about_y = main_rect.y + main_rect.h - button_h - spacing;
-        int refresh_y = about_y - button_h - spacing;
+        int exit_y = about_y - button_h - spacing;
 
         if (
             px >= x && px <= x + width &&
             py >= y && py <= y + input_h
         ) {
-            if (ensure_user() && load_catalogs()) {
-                app_mode = MODE_CATALOGS;
-            } else {
-                Message(
-                    ICON_ERROR,
-                    "BookFerry",
-                    "Не удалось получить библиотеки",
-                    3000
-                );
-            }
-            draw_screen();
+            if (ensure_user()) load_catalogs();
             return;
         }
 
@@ -1234,6 +1682,7 @@ static void handle_tap(int px, int py) {
             px >= x && px <= x + width &&
             py >= y && py <= y + input_h
         ) {
+            scanner_log("keyboard_open_requested", NULL, 0);
             OpenKeyboard(
                 "Поиск",
                 search_text,
@@ -1258,16 +1707,9 @@ static void handle_tap(int px, int py) {
 
         if (
             px >= x && px <= x + width &&
-            py >= refresh_y && py <= refresh_y + button_h
+            py >= exit_y && py <= exit_y + button_h
         ) {
-            refresh_library();
-            Message(
-                ICON_INFORMATION,
-                "Готово",
-                "Сканирование библиотеки запущено",
-                2200
-            );
-            draw_screen();
+            CloseApp();
             return;
         }
 
@@ -1289,8 +1731,9 @@ static void handle_tap(int px, int py) {
 
         if (py >= nav_y && py <= nav_y + button_h) {
             if (px >= x && px <= x + nav_w) {
-                if (current_page > 0) current_page--;
-                else {
+                if (current_page > 0) {
+                    current_page--;
+                } else {
                     app_mode = MODE_HOME;
                     clear_entries();
                 }
@@ -1314,16 +1757,7 @@ static void handle_tap(int px, int py) {
                     next_page_url[0] &&
                     entries_count < MAX_ENTRIES
                 ) {
-                    if (load_next_page()) {
-                        current_page++;
-                    } else {
-                        Message(
-                            ICON_ERROR,
-                            "BookFerry",
-                            "Следующая страница не загрузилась",
-                            3000
-                        );
-                    }
+                    load_next_page();
                 }
             }
 
@@ -1338,8 +1772,7 @@ static void handle_tap(int px, int py) {
                 (py - list_y) / item_h;
 
             if (index >= 0 && index < entries_count) {
-                download_book_to_device(&entries[index]);
-                draw_screen();
+                start_download(&entries[index]);
             }
             return;
         }
@@ -1366,7 +1799,10 @@ static void handle_tap(int px, int py) {
                 int total =
                     (catalogs_count + ITEMS_PER_PAGE - 1) /
                     ITEMS_PER_PAGE;
-                if (catalog_page < total - 1) catalog_page++;
+
+                if (catalog_page < total - 1) {
+                    catalog_page++;
+                }
             }
 
             draw_screen();
@@ -1388,23 +1824,8 @@ static void handle_tap(int px, int py) {
                         1,
                         keyboard_opds_handler
                     );
-                } else if (select_catalog(&catalogs[index])) {
-                    Message(
-                        ICON_INFORMATION,
-                        "BookFerry",
-                        "Библиотека изменена",
-                        1600
-                    );
-                    app_mode = MODE_HOME;
-                    draw_screen();
                 } else {
-                    Message(
-                        ICON_ERROR,
-                        "BookFerry",
-                        "Не удалось сменить библиотеку",
-                        3000
-                    );
-                    draw_screen();
+                    select_catalog(&catalogs[index]);
                 }
             }
             return;
@@ -1420,6 +1841,37 @@ static void handle_tap(int px, int py) {
     }
 }
 
+static void shutdown_downloads(void) {
+    ClearTimer(download_poll_timer);
+    ClearTimer(deferred_keyboard_search);
+    ClearTimer(scanner_poll);
+    cancel_text();
+    if (download_state.active) {
+        close_download_session(true);
+        remove(download_state.tmp_path);
+        download_state.active = false;
+    }
+    if (scanner_child > 0) {
+        waitpid(scanner_child, NULL, WNOHANG);
+        scanner_child = -1;
+    }
+}
+
+static void terminate_on_home(void) {
+    // CloseApp() alone can be deferred while InkView has suspended the task.
+    // Explicitly clean up before leaving the process so it cannot reopen
+    // in a half-suspended state.
+    scanner_log("lifecycle_terminate_begin", NULL, (long)getpid());
+    shutdown_downloads();
+    if (font) {
+        CloseFont(font);
+        font = NULL;
+    }
+    scanner_log("lifecycle_terminate_done", NULL, (long)getpid());
+    fflush(NULL);
+    exit(0);
+}
+
 static int main_handler(int type, int par1, int par2) {
     switch (type) {
         case EVT_INIT: {
@@ -1432,6 +1884,9 @@ static int main_handler(int type, int par1, int par2) {
             font = OpenFont("DejaVu Sans", font_size, false);
             load_settings();
 
+            memset(&download_state, 0, sizeof(download_state));
+            download_state.session = -1;
+
             main_rect.y = screen_h * 7 / 100;
             main_rect.w = screen_w;
             main_rect.h =
@@ -1440,18 +1895,40 @@ static int main_handler(int type, int par1, int par2) {
         }
 
         case EVT_SHOW:
-            if (!startup_synced) {
-                if (ensure_user()) load_profile();
-                startup_synced = true;
-            }
             draw_screen();
+            if (!startup_synced) {
+                startup_synced = true;
+                // Local config already has UID/catalog; avoid a blocking
+                // startup profile fetch while the user starts interacting.
+                if (!user_uid[0]) register_user();
+            }
             break;
 
         case EVT_POINTERDOWN:
             handle_tap(par1, par2);
             break;
 
+#ifdef EVT_BACKGROUND
+        case EVT_BACKGROUND:
+            // The stock launcher normally suspends apps on Home. For
+            // BookFerry, leave instead of resuming a stale InkView state.
+            scanner_log("lifecycle_background_close", NULL, 0);
+            terminate_on_home();
+            return 1;
+#endif
+
+#if defined(EVT_KEYPRESS) && defined(IV_KEY_HOME)
+        case EVT_KEYPRESS:
+            if (par1 == IV_KEY_HOME) {
+                scanner_log("lifecycle_home_close", NULL, 0);
+                terminate_on_home();
+                return 1;
+            }
+            break;
+#endif
+
         case EVT_EXIT:
+            shutdown_downloads();
             CloseFont(font);
             break;
     }
@@ -1459,7 +1936,7 @@ static int main_handler(int type, int par1, int par2) {
     return 0;
 }
 
-int main() {
+int main(void) {
     InkViewMain(main_handler);
     return 0;
 }

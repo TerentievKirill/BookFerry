@@ -1,0 +1,46 @@
+name: Build PocketBook client
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "pocketbook/**"
+      - ".github/workflows/pocketbook-build.yml"
+  pull_request:
+    paths:
+      - "pocketbook/**"
+      - ".github/workflows/pocketbook-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [pb632-fw6, pocketbook-armv7-softfp]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDK extraction tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full zip
+      - name: Cache verified SDK archive
+        uses: actions/cache@v4
+        with:
+          path: work/downloads
+          key: bookferry-pocketbook-sdk-b288-6.10
+      - name: Compile native PocketBook application
+        env:
+          PB_TARGET: ${{ matrix.target }}
+        run: bash pocketbook/build.sh
+      - name: Upload installable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: bookferry-${{ matrix.target }}
+          path: |
+            dist/BookFerry.app
+            dist/BookFerry-${{ matrix.target }}.zip
+            dist/elf-attributes.txt
+          if-no-files-found: error
