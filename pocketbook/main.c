@@ -2027,6 +2027,21 @@ static void shutdown_downloads(void) {
     }
 }
 
+static void terminate_on_home(void) {
+    // CloseApp() alone can be deferred while InkView has suspended the task.
+    // Explicitly clean up before leaving the process so it cannot reopen
+    // in a half-suspended state.
+    scanner_log("lifecycle_terminate_begin", NULL, (long)getpid());
+    shutdown_downloads();
+    if (font) {
+        CloseFont(font);
+        font = NULL;
+    }
+    scanner_log("lifecycle_terminate_done", NULL, (long)getpid());
+    fflush(NULL);
+    exit(0);
+}
+
 static int main_handler(int type, int par1, int par2) {
     switch (type) {
         case EVT_INIT: {
@@ -2066,7 +2081,7 @@ static int main_handler(int type, int par1, int par2) {
             // The stock launcher normally suspends apps on Home. For
             // BookFerry, leave instead of resuming a stale InkView state.
             scanner_log("lifecycle_background_close", NULL, 0);
-            CloseApp();
+            terminate_on_home();
             return 1;
 #endif
 
@@ -2074,7 +2089,7 @@ static int main_handler(int type, int par1, int par2) {
         case EVT_KEYPRESS:
             if (par1 == IV_KEY_HOME) {
                 scanner_log("lifecycle_home_close", NULL, 0);
-                CloseApp();
+                terminate_on_home();
                 return 1;
             }
             break;
