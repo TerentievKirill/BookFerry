@@ -1196,6 +1196,9 @@ static void download_poll_timer(void) {
             // Notify InkView after the validated EPUB has its final path.
             // Firmware determines whether this indexes the new book.
             BookReady(download_state.filepath);
+            // Firmware PB632 may not refresh the bookshelf from BookReady().
+            // Start the firmware scanner only after a successful new EPUB.
+            system("/ebrmain/bin/scanner.app >/dev/null 2>&1 &");
             finish_download(true, "EPUB скачан в папку Books");
             return;
         }
