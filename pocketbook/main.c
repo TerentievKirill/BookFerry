@@ -1585,6 +1585,7 @@ static void draw_screen(void) {
 
     if (app_mode == MODE_HOME) {
         int about_y = main_rect.y + main_rect.h - button_h - spacing;
+        int exit_y = about_y - button_h - spacing;
 
         DrawRect(x, y, width, input_h, BLACK);
         DrawString(
@@ -1617,6 +1618,13 @@ static void draw_screen(void) {
             x + (width - StringWidth(">>> НАЧАТЬ ПОИСК <<<")) / 2,
             y + (button_h - font->height) / 2,
             ">>> НАЧАТЬ ПОИСК <<<"
+        );
+
+        DrawRect(x, exit_y, width, button_h, BLACK);
+        DrawString(
+            x + (width - StringWidth("[ Выход ]")) / 2,
+            exit_y + (button_h - font->height) / 2,
+            "[ Выход ]"
         );
 
         DrawRect(x, about_y, width, button_h, BLACK);
@@ -1737,6 +1745,9 @@ static void draw_screen(void) {
 static void keyboard_search_handler(char *text) {
     if (text) {
         safe_copy(search_text, text, sizeof(search_text));
+        if (search_text[0]) {
+            do_search();
+        }
     }
     draw_screen();
 }
@@ -1793,6 +1804,7 @@ static void handle_tap(int px, int py) {
     if (app_mode == MODE_HOME) {
         int y = main_rect.y + spacing;
         int about_y = main_rect.y + main_rect.h - button_h - spacing;
+        int exit_y = about_y - button_h - spacing;
 
         if (
             px >= x && px <= x + width &&
@@ -1837,6 +1849,14 @@ static void handle_tap(int px, int py) {
         ) {
             do_search();
             draw_screen();
+            return;
+        }
+
+        if (
+            px >= x && px <= x + width &&
+            py >= exit_y && py <= exit_y + button_h
+        ) {
+            CloseApp();
             return;
         }
 
