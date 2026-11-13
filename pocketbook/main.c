@@ -1009,7 +1009,7 @@ static void scanner_log(const char *event, const char *path, long value) {
     mkdir(BOOKFERRY_SCAN_DIR, 0755);
     log = fopen(BOOKFERRY_SCAN_LOG, "a");
     if (!log) return;
-    fprintf(log, "%ld %s path=%s value=%ld\\n",
+    fprintf(log, "%ld %s path=%s value=%ld\n",
             (long)now, event, path ? path : "-", value);
     fclose(log);
 }
@@ -1035,7 +1035,7 @@ static void notify_library_scanner(const char *path) {
             close(fd);
         }
         execl(BOOKFERRY_SCANNER, BOOKFERRY_SCANNER, (char *)NULL);
-        dprintf(STDERR_FILENO, "BookFerry scanner exec failed: errno=%d\\n", errno);
+        dprintf(STDERR_FILENO, "BookFerry scanner exec failed: errno=%d\n", errno);
         _exit(127);
     }
     scanner_log("scanner_forked_pid", path, (long)child);
