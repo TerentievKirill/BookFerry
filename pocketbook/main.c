@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <inkview.h>
 
 #define DEFAULT_SERVER_URL "https://api.heartlab.app"
@@ -26,10 +27,12 @@
 #define DOWNLOAD_SESSION_TIMEOUT 45
 #define DOWNLOAD_TOTAL_TIMEOUT_MS 60000LL
 #define DOWNLOAD_POLL_MS 250
-#define DOWNLOAD_REDRAW_MS 1000LL
-#define DOWNLOAD_REPORT_TIMEOUT 5
-#define DOWNLOAD_REPORT_POLL_MS 250
-#define DOWNLOAD_REPORT_FILE "/tmp/bookferry_client_result.tmp"
+#define DOWNLOAD_REDRAW_MS 2500LL
+#define TEXT_FILE "/tmp/bookferry_text_response.tmp"
+#define TEXT_MAX (2 * 1024 * 1024)
+#define TEXT_TIMEOUT_MS 30000LL
+#define TEXT_POLL_MS 250
+#define SCANNER_POLL_MS 500
 
 enum {
     MODE_HOME = 0,
@@ -95,16 +98,30 @@ int entries_count = 0;
 int current_page = 0;
 int catalogs_count = 0;
 int catalog_page = 0;
-time_t last_tap_time = 0;
+long long last_tap_ms = 0;
 bool startup_synced = false;
 
 static DownloadState download_state;
-static int report_session = -1;
-static long long report_started_ms = 0;
+typedef enum {
+    REQ_NONE, REQ_REGISTER, REQ_PROFILE, REQ_CATALOGS,
+    REQ_SELECT_CATALOG, REQ_SELECT_OPDS, REQ_SEARCH, REQ_NEXT
+} RequestKind;
+typedef struct {
+    bool active;
+    int session;
+    RequestKind kind;
+    long long started_ms;
+} TextJob;
+static TextJob text_job = { .session = -1 };
+static char requested_opds[1024] = "";
+static pid_t scanner_child = -1;
 
 static void draw_screen(void);
 static void download_poll_timer(void);
-static void report_poll_timer(void);
+static void text_poll(void);
+static void scanner_poll(void);
+static void cancel_text(void);
+static bool request_text(RequestKind kind, const char *url, const char *label);
 static void deferred_keyboard_search(void);
 
 
@@ -218,26 +235,21 @@ static long file_size(const char *path) {
     return (long)st.st_size;
 }
 
-static char *http_get_text(const char *url, int timeout) {
-    int size = 0;
-    void *raw = QuickDownload(url, &size, timeout);
-    char *text;
-
-    if (!raw || size <= 0) {
-        if (raw) free(raw);
-        return NULL;
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    long n;
+    char *buf;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) || (n = ftell(f)) <= 0 || n > TEXT_MAX ||
+        fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf); fclose(f); return NULL;
     }
-
-    text = (char *)malloc(size + 1);
-    if (!text) {
-        free(raw);
-        return NULL;
-    }
-
-    memcpy(text, raw, size);
-    text[size] = '\0';
-    free(raw);
-    return text;
+    buf[n] = 0;
+    fclose(f);
+    return buf;
 }
 
 static void sanitize_filename(char *name) {
@@ -280,7 +292,8 @@ static void clear_entries(void) {
 static void save_settings(void) {
     FILE *file;
 
-    system("mkdir -p " CONFIG_DIR);
+    mkdir("/mnt/ext1/system/config", 0755);
+    mkdir(CONFIG_DIR, 0755);
 
     file = fopen(CONFIG_FILE, "w");
     if (!file) return;
@@ -738,141 +751,7 @@ static void set_transport_error(
     );
 }
 
-static void close_report_session(bool abort_first) {
-    if (report_session < 0) return;
-
-    if (abort_first) {
-        AbortTransfer(report_session);
-    }
-
-    CloseSession(report_session);
-    report_session = -1;
-    report_started_ms = 0;
-    remove(DOWNLOAD_REPORT_FILE);
-}
-
-static void report_poll_timer(void) {
-    int status;
-    iv_sessioninfo *info;
-    long long elapsed;
-
-    if (report_session < 0) return;
-
-    status = GetSessionStatus(report_session);
-    info = GetSessionInfo(report_session);
-    elapsed = now_ms() - report_started_ms;
-
-    if (status < 0) {
-        close_report_session(false);
-        return;
-    }
-
-    if (
-        status == NET_OK &&
-        info &&
-        info->response != 0
-    ) {
-        close_report_session(false);
-        return;
-    }
-
-    if (elapsed >= 7000LL) {
-        close_report_session(true);
-        return;
-    }
-
-    SetWeakTimer(
-        "bookferry_report",
-        report_poll_timer,
-        DOWNLOAD_REPORT_POLL_MS
-    );
-}
-
-static void report_download_client_result(
-    const BookEntry *book,
-    const char *status,
-    long bytes,
-    int attempts,
-    long duration_ms,
-    int http_status,
-    int net_status,
-    const char *error
-) {
-    char encoded_title[1024];
-    char encoded_error[512];
-    char report_url[URL_LEN];
-    int session;
-    int start_result;
-
-    if (!user_uid[0] || !status || !status[0]) return;
-
-    url_encode(
-        book && book->title[0] ? book->title : "-",
-        encoded_title,
-        sizeof(encoded_title)
-    );
-    url_encode(
-        error && error[0] ? error : "-",
-        encoded_error,
-        sizeof(encoded_error)
-    );
-
-    snprintf(
-        report_url,
-        sizeof(report_url),
-        "%s/download/client-result"
-        "?uid=%s"
-        "&status=%s"
-        "&bytes=%ld"
-        "&attempts=%d"
-        "&duration_ms=%ld"
-        "&http_status=%d"
-        "&net_status=%d"
-        "&title=%s"
-        "&error=%s",
-        server_url,
-        user_uid,
-        status,
-        bytes,
-        attempts,
-        duration_ms,
-        http_status,
-        net_status,
-        encoded_title,
-        encoded_error
-    );
-
-    if (report_session >= 0) {
-        ClearTimer(report_poll_timer);
-        close_report_session(true);
-    }
-
-    remove(DOWNLOAD_REPORT_FILE);
-    session = NewSession();
-    if (session < 0) return;
-
-    start_result = DownloadTo(
-        session,
-        report_url,
-        NULL,
-        DOWNLOAD_REPORT_FILE,
-        DOWNLOAD_REPORT_TIMEOUT
-    );
-
-    if (start_result != NET_OK) {
-        CloseSession(session);
-        remove(DOWNLOAD_REPORT_FILE);
-        return;
-    }
-
-    report_session = session;
-    report_started_ms = now_ms();
-    SetWeakTimer(
-        "bookferry_report",
-        report_poll_timer,
-        DOWNLOAD_REPORT_POLL_MS
-    );
-}
+/* No client download telemetry in BookFerry 3.0. */
 
 static void close_download_session(bool abort_first) {
     if (download_state.session < 0) return;
@@ -1048,12 +927,10 @@ static void finish_download(bool success, const char *user_message) {
     // No asynchronous transfer or telemetry may survive a terminal
     // download result (success, final failure, or user cancellation).
     ClearTimer(download_poll_timer);
-    ClearTimer(report_poll_timer);
 
     // The active transfer has normally completed, but some error paths
     // still have a session. Abort it to avoid background network activity.
     close_download_session(true);
-    close_report_session(true);
 
     return_mode = download_state.return_mode;
     cleanup_download_parts();
@@ -1359,7 +1236,7 @@ static void start_download(BookEntry *book) {
         encoded_url
     );
 
-    system("mkdir -p " BOOKS_DIR);
+    mkdir(BOOKS_DIR, 0755);
 
     snprintf(
         filename,
@@ -2007,7 +1884,6 @@ static void handle_tap(int px, int py) {
 
 static void shutdown_downloads(void) {
     ClearTimer(download_poll_timer);
-    ClearTimer(report_poll_timer);
     ClearTimer(deferred_keyboard_search);
 
     if (download_state.active) {
@@ -2017,8 +1893,7 @@ static void shutdown_downloads(void) {
     }
 
     if (report_session >= 0) {
-        close_report_session(true);
-    }
+        }
 }
 
 static void terminate_on_home(void) {
