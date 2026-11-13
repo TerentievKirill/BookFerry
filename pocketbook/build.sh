@@ -31,16 +31,20 @@ if [[ ! -x "$PREFIX-gcc" ]]; then
 fi
 test -x "$PREFIX-gcc" || { echo "SDK compiler is missing" >&2; exit 1; }
 SYSROOT="$SDK/usr/arm-obreey-linux-gnueabi/sysroot"
-test -f "$SYSROOT/usr/include/inkview.h" || {
-  echo "InkView headers not found in SDK sysroot" >&2
+INKVIEW_HEADER="$(find "$SDK" -type f -name inkview.h -print -quit)"
+INKVIEW_LIBRARY="$(find "$SDK" \( -type f -o -type l \) \( -name libinkview.so -o -name libinkview.a \) -print -quit)"
+if [[ -z "$INKVIEW_HEADER" || -z "$INKVIEW_LIBRARY" ]]; then
+  echo "InkView SDK headers or library not found" >&2
   exit 1
-}
+fi
+echo "InkView header: $INKVIEW_HEADER"
+echo "InkView library: $INKVIEW_LIBRARY"
 # Shell word splitting on the fixed, locally defined compiler flags is intentional.
 # shellcheck disable=SC2086
 "$PREFIX-gcc" --sysroot="$SYSROOT" $FLAGS -fsigned-char -DPLATFORM_FC -fcommon \
   -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
-  -I"$SYSROOT/usr/include" pocketbook/main.c -o "dist/BookFerry.app" \
-  -L"$SYSROOT/usr/lib" -linkview
+  -I"$(dirname "$INKVIEW_HEADER")" pocketbook/main.c -o "dist/BookFerry.app" \
+  -L"$(dirname "$INKVIEW_LIBRARY")" -linkview
 "$PREFIX-strip" "dist/BookFerry.app"
 file "dist/BookFerry.app"
 "$PREFIX-readelf" -h "dist/BookFerry.app" | grep -q 'Machine:.*ARM'
