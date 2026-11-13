@@ -1495,7 +1495,7 @@ static void draw_screen(void) {
 
         DrawString(x, y, "BookFerry для PocketBook");
         y += font->height * 2;
-        DrawString(x, y, "Версия: 2.2");
+        DrawString(x, y, "Версия: 3.0");
         y += font->height + 10;
         DrawString(x, y, "Поиск через сервер BookFerry");
         y += font->height + 10;
@@ -1532,13 +1532,15 @@ static void keyboard_search_handler(char *text) {
     if (text) {
         safe_copy(search_text, text, sizeof(search_text));
     }
-    draw_screen();
-    // Do not run blocking QuickDownload() in the keyboard's callback.
+    // Keyboard is still being dismissed; redraw on the next event turn.
+    // Do not start an HTTP operation from inside its callback.
     // Return to InkView first and start the search on the next event turn.
     if (text && search_text[0]) {
         ClearTimer(deferred_keyboard_search);
         SetWeakTimer("bookferry_keyboard_search", deferred_keyboard_search, 150);
         scanner_log("keyboard_search_scheduled", NULL, 150);
+    } else {
+        draw_screen();
     }
 }
 
@@ -1548,23 +1550,8 @@ static void keyboard_opds_handler(char *text) {
         return;
     }
 
-    if (select_custom_opds(text)) {
-        Message(
-            ICON_INFORMATION,
-            "BookFerry",
-            "OPDS подключён",
-            1800
-        );
-        app_mode = MODE_HOME;
-    } else {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Не удалось подключить OPDS",
-            3000
-        );
-    }
-
+    if (!select_custom_opds(text))
+        Message(ICON_ERROR, "BookFerry", "Не удалось начать запрос OPDS", 2400);
     draw_screen();
 }
 
@@ -1588,8 +1575,9 @@ static void handle_tap(int px, int py) {
         return;
     }
 
-    if (time(NULL) - last_tap_time < 1) return;
-    last_tap_time = time(NULL);
+    if (now_ms() - last_tap_ms < 250) return;
+    last_tap_ms = now_ms();
+    if (text_job.active) return;
 
     if (app_mode == MODE_HOME) {
         int y = main_rect.y + spacing;
@@ -1600,17 +1588,7 @@ static void handle_tap(int px, int py) {
             px >= x && px <= x + width &&
             py >= y && py <= y + input_h
         ) {
-            if (ensure_user() && load_catalogs()) {
-                app_mode = MODE_CATALOGS;
-            } else {
-                Message(
-                    ICON_ERROR,
-                    "BookFerry",
-                    "Не удалось получить библиотеки",
-                    3000
-                );
-            }
-            draw_screen();
+            if (ensure_user()) load_catalogs();
             return;
         }
 
@@ -1695,16 +1673,7 @@ static void handle_tap(int px, int py) {
                     next_page_url[0] &&
                     entries_count < MAX_ENTRIES
                 ) {
-                    if (load_next_page()) {
-                        current_page++;
-                    } else {
-                        Message(
-                            ICON_ERROR,
-                            "BookFerry",
-                            "Следующая страница не загрузилась",
-                            3000
-                        );
-                    }
+                    if (load_next_page()) current_page++;
                 }
             }
 
@@ -1771,23 +1740,8 @@ static void handle_tap(int px, int py) {
                         1,
                         keyboard_opds_handler
                     );
-                } else if (select_catalog(&catalogs[index])) {
-                    Message(
-                        ICON_INFORMATION,
-                        "BookFerry",
-                        "Библиотека изменена",
-                        1600
-                    );
-                    app_mode = MODE_HOME;
-                    draw_screen();
                 } else {
-                    Message(
-                        ICON_ERROR,
-                        "BookFerry",
-                        "Не удалось сменить библиотеку",
-                        3000
-                    );
-                    draw_screen();
+                    select_catalog(&catalogs[index]);
                 }
             }
             return;
@@ -1806,15 +1760,17 @@ static void handle_tap(int px, int py) {
 static void shutdown_downloads(void) {
     ClearTimer(download_poll_timer);
     ClearTimer(deferred_keyboard_search);
-
+    ClearTimer(scanner_poll);
+    cancel_text();
     if (download_state.active) {
         close_download_session(true);
         remove(download_state.tmp_path);
         download_state.active = false;
     }
-
-    if (report_session >= 0) {
-        }
+    if (scanner_child > 0) {
+        waitpid(scanner_child, NULL, WNOHANG);
+        scanner_child = -1;
+    }
 }
 
 static void terminate_on_home(void) {
@@ -1855,11 +1811,12 @@ static int main_handler(int type, int par1, int par2) {
         }
 
         case EVT_SHOW:
-            if (!startup_synced) {
-                if (ensure_user()) load_profile();
-                startup_synced = true;
-            }
             draw_screen();
+            if (!startup_synced) {
+                startup_synced = true;
+                if (!user_uid[0]) register_user();
+                else load_profile();
+            }
             break;
 
         case EVT_POINTERDOWN:
