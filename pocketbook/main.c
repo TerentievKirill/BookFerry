@@ -105,6 +105,7 @@ static long long report_started_ms = 0;
 static void draw_screen(void);
 static void download_poll_timer(void);
 static void report_poll_timer(void);
+static void deferred_keyboard_search(void);
 
 
 static void safe_copy(char *dst, const char *src, int dst_len) {
@@ -1719,14 +1720,28 @@ static void draw_screen(void) {
     FullUpdate();
 }
 
+static void deferred_keyboard_search(void) {
+    scanner_log("keyboard_search_timer_fired", NULL, 0);
+    if (!search_text[0]) return;
+    scanner_log("keyboard_search_begin", NULL, 0);
+    do_search();
+    scanner_log("keyboard_search_done", NULL, 0);
+    draw_screen();
+}
+
 static void keyboard_search_handler(char *text) {
+    scanner_log("keyboard_callback", NULL, text ? (long)strlen(text) : -1L);
     if (text) {
         safe_copy(search_text, text, sizeof(search_text));
-        if (search_text[0]) {
-            do_search();
-        }
     }
     draw_screen();
+    // Do not run blocking QuickDownload() in the keyboard's callback.
+    // Return to InkView first and start the search on the next event turn.
+    if (text && search_text[0]) {
+        ClearTimer(deferred_keyboard_search);
+        SetWeakTimer("bookferry_keyboard_search", deferred_keyboard_search, 150);
+        scanner_log("keyboard_search_scheduled", NULL, 150);
+    }
 }
 
 static void keyboard_opds_handler(char *text) {
@@ -1807,6 +1822,7 @@ static void handle_tap(int px, int py) {
             px >= x && px <= x + width &&
             py >= y && py <= y + input_h
         ) {
+            scanner_log("keyboard_open_requested", NULL, 0);
             OpenKeyboard(
                 "Поиск",
                 search_text,
@@ -1992,6 +2008,7 @@ static void handle_tap(int px, int py) {
 static void shutdown_downloads(void) {
     ClearTimer(download_poll_timer);
     ClearTimer(report_poll_timer);
+    ClearTimer(deferred_keyboard_search);
 
     if (download_state.active) {
         close_download_session(true);
