@@ -348,240 +348,102 @@ static void show_progress(const char *message) {
     FullUpdate();
 }
 
-static bool register_user(void) {
-    char url[URL_LEN];
-    char *text;
-    char *fields[5];
-    int count;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/register?client_type=pocketbook&plain=1&ts=%ld",
-        server_url,
-        (long)time(NULL)
-    );
-
-    show_progress("Регистрация...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 5);
-
-    if (count < 4 || strcmp(fields[0], "UID") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_register(char *text) {
+    char *fields[5]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 5);
+    if (n < 4 || strcmp(fields[0], "UID")) return false;
     safe_copy(user_uid, fields[1], sizeof(user_uid));
     percent_decode(fields[3], catalog_name, sizeof(catalog_name));
-    custom_opds_url[0] = '\0';
+    custom_opds_url[0] = 0;
     save_settings();
-
-    free(text);
     return true;
 }
-
-static bool load_profile(void) {
-    char url[URL_LEN];
-    char *text;
-    char *fields[6];
-    int count;
-
-    if (!user_uid[0]) return false;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s?plain=1",
-        server_url,
-        user_uid
-    );
-
-    text = http_get_text(url, 20);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 6);
-
-    if (count < 5 || strcmp(fields[0], "PROFILE") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_profile(char *text) {
+    char *fields[6]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 6);
+    if (n < 5 || strcmp(fields[0], "PROFILE")) return false;
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-
-    if (strcmp(fields[3], "custom") == 0) {
-        percent_decode(
-            fields[4],
-            custom_opds_url,
-            sizeof(custom_opds_url)
-        );
-    } else {
-        custom_opds_url[0] = '\0';
-    }
-
+    if (!strcmp(fields[3], "custom"))
+        percent_decode(fields[4], custom_opds_url, sizeof(custom_opds_url));
+    else custom_opds_url[0] = 0;
     save_settings();
-    free(text);
     return true;
 }
-
-static bool ensure_user(void) {
-    if (user_uid[0]) return true;
-
-    if (!register_user()) {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Не удалось зарегистрировать устройство",
-            3000
-        );
-        return false;
-    }
-
-    return true;
-}
-
-static bool load_catalogs(void) {
-    char url[URL_LEN];
-    char *text;
-    char *line;
-
-    snprintf(url, sizeof(url), "%s/catalogs?plain=1", server_url);
-
-    show_progress("Библиотеки...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    catalogs_count = 0;
-    catalog_page = 0;
+static bool parse_catalogs(char *text) {
+    char *line = text;
+    catalogs_count = catalog_page = 0;
     memset(catalogs, 0, sizeof(catalogs));
-
-    line = text;
-
     while (line && *line && catalogs_count < MAX_CATALOGS) {
-        char *eol = strchr(line, '\n');
-        char *fields[4];
-        int count;
-
-        if (eol) *eol = '\0';
-        line[strcspn(line, "\r")] = '\0';
-        count = split_fields(line, fields, 4);
-
-        if (count >= 3 && strcmp(fields[0], "CATALOG") == 0) {
-            CatalogEntry *catalog = &catalogs[catalogs_count++];
-
-            catalog->id = atoi(fields[1]);
-            percent_decode(
-                fields[2],
-                catalog->name,
-                sizeof(catalog->name)
-            );
-        } else if (
-            count >= 2 &&
-            strcmp(fields[0], "CUSTOM") == 0
-        ) {
-            CatalogEntry *catalog = &catalogs[catalogs_count++];
-
-            catalog->custom = true;
-            percent_decode(
-                fields[1],
-                catalog->name,
-                sizeof(catalog->name)
-            );
+        char *eol = strchr(line, '\n'), *fields[4];
+        int n;
+        if (eol) *eol = 0;
+        line[strcspn(line, "\r")] = 0;
+        n = split_fields(line, fields, 4);
+        if (n >= 3 && !strcmp(fields[0], "CATALOG")) {
+            CatalogEntry *c = &catalogs[catalogs_count++];
+            c->id = atoi(fields[1]);
+            percent_decode(fields[2], c->name, sizeof(c->name));
+        } else if (n >= 2 && !strcmp(fields[0], "CUSTOM")) {
+            CatalogEntry *c = &catalogs[catalogs_count++];
+            c->custom = true;
+            percent_decode(fields[1], c->name, sizeof(c->name));
         }
-
         line = eol ? eol + 1 : NULL;
     }
-
-    free(text);
     return catalogs_count > 0;
 }
-
-static bool select_catalog(CatalogEntry *catalog) {
-    char url[URL_LEN];
-    char *text;
-    char *fields[4];
-    int count;
-
-    if (!catalog || catalog->custom || !user_uid[0]) return false;
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s/catalog?catalog_id=%d&plain=1",
-        server_url,
-        user_uid,
-        catalog->id
-    );
-
-    show_progress("Сохраняю...");
-    text = http_get_text(url, 30);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 4);
-
-    if (count < 3 || strcmp(fields[0], "OK") != 0) {
-        free(text);
-        return false;
-    }
-
+static bool parse_selection(char *text, bool is_opds) {
+    char *fields[4]; int n;
+    text[strcspn(text, "\r\n")] = 0;
+    n = split_fields(text, fields, 4);
+    if (n < 3 || strcmp(fields[0], "OK")) return false;
     percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-    custom_opds_url[0] = '\0';
+    if (is_opds && atoi(fields[1]) == 0)
+        safe_copy(custom_opds_url, requested_opds, sizeof(custom_opds_url));
+    else custom_opds_url[0] = 0;
     clear_entries();
     save_settings();
-
-    free(text);
     return true;
 }
-
-static bool select_custom_opds(const char *opds_url) {
-    char encoded[3072];
+static bool register_user(void) {
     char url[URL_LEN];
-    char *text;
-    char *fields[4];
-    int count;
-
-    if (!opds_url || !opds_url[0] || !user_uid[0]) return false;
-
+    snprintf(url, sizeof(url), "%s/users/register?client_type=pocketbook&plain=1&ts=%ld",
+             server_url, (long)time(NULL));
+    return request_text(REQ_REGISTER, url, "Регистрация...");
+}
+static bool load_profile(void) {
+    char url[URL_LEN];
+    if (!user_uid[0]) return false;
+    snprintf(url, sizeof(url), "%s/users/%s?plain=1", server_url, user_uid);
+    return request_text(REQ_PROFILE, url, "Профиль...");
+}
+static bool ensure_user(void) {
+    if (user_uid[0]) return true;
+    if (!text_job.active) register_user();
+    return false;
+}
+static bool load_catalogs(void) {
+    char url[URL_LEN];
+    snprintf(url, sizeof(url), "%s/catalogs?plain=1", server_url);
+    return request_text(REQ_CATALOGS, url, "Библиотеки...");
+}
+static bool select_catalog(CatalogEntry *catalog) {
+    char url[URL_LEN];
+    if (!catalog || catalog->custom || !ensure_user()) return false;
+    snprintf(url, sizeof(url), "%s/users/%s/catalog?catalog_id=%d&plain=1",
+             server_url, user_uid, catalog->id);
+    return request_text(REQ_SELECT_CATALOG, url, "Сохраняю...");
+}
+static bool select_custom_opds(const char *opds_url) {
+    char encoded[3072], url[URL_LEN];
+    if (!opds_url || !opds_url[0] || !ensure_user()) return false;
+    safe_copy(requested_opds, opds_url, sizeof(requested_opds));
     url_encode(opds_url, encoded, sizeof(encoded));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/users/%s/opds?opds_url=%s&plain=1",
-        server_url,
-        user_uid,
-        encoded
-    );
-
-    show_progress("Проверяю OPDS...");
-    text = http_get_text(url, 60);
-    if (!text) return false;
-
-    text[strcspn(text, "\r\n")] = '\0';
-    count = split_fields(text, fields, 4);
-
-    if (count < 3 || strcmp(fields[0], "OK") != 0) {
-        free(text);
-        return false;
-    }
-
-    percent_decode(fields[2], catalog_name, sizeof(catalog_name));
-
-    if (atoi(fields[1]) == 0) {
-        safe_copy(custom_opds_url, opds_url, sizeof(custom_opds_url));
-    } else {
-        custom_opds_url[0] = '\0';
-    }
-
-    clear_entries();
-    save_settings();
-
-    free(text);
-    return true;
+    snprintf(url, sizeof(url), "%s/users/%s/opds?opds_url=%s&plain=1",
+             server_url, user_uid, encoded);
+    return request_text(REQ_SELECT_OPDS, url, "Проверяю OPDS...");
 }
 
 static bool parse_search_page(char *text) {
@@ -639,75 +501,22 @@ static bool parse_search_page(char *text) {
     return got_books;
 }
 
-static bool load_search_page(const char *url, const char *message) {
-    char *text;
-    bool result;
-
-    if (message) show_progress(message);
-
-    text = http_get_text(url, 90);
-    if (!text) return false;
-
-    result = parse_search_page(text);
-    free(text);
-    return result;
-}
-
 static void do_search(void) {
-    char query[1024];
-    char url[URL_LEN];
-
-    if (!search_text[0] || !ensure_user()) return;
-
-    clear_entries();
+    char query[1024], url[URL_LEN];
+    if (!search_text[0] || !ensure_user() || text_job.active) return;
     url_encode(search_text, query, sizeof(query));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/search?uid=%s&query=%s&plain=1",
-        server_url,
-        user_uid,
-        query
-    );
-
-    if (!load_search_page(url, "Поиск...")) {
-        Message(
-            ICON_ERROR,
-            "BookFerry",
-            "Ничего не найдено или сервер недоступен",
-            3000
-        );
-        return;
-    }
-
-    app_mode = MODE_RESULTS;
-    current_page = 0;
+    snprintf(url, sizeof(url), "%s/search?uid=%s&query=%s&plain=1",
+             server_url, user_uid, query);
+    request_text(REQ_SEARCH, url, "Поиск...");
 }
-
 static bool load_next_page(void) {
-    char query[1024];
-    char page[6144];
-    char url[URL_LEN];
-    int old_count = entries_count;
-
-    if (!next_page_url[0]) return false;
-
+    char query[1024], page[6144], url[URL_LEN];
+    if (!next_page_url[0] || text_job.active) return false;
     url_encode(search_text, query, sizeof(query));
     url_encode(next_page_url, page, sizeof(page));
-
-    snprintf(
-        url,
-        sizeof(url),
-        "%s/search?uid=%s&query=%s&page_url=%s&plain=1",
-        server_url,
-        user_uid,
-        query,
-        page
-    );
-
-    if (!load_search_page(url, "Следующая страница...")) return false;
-    return entries_count > old_count;
+    snprintf(url, sizeof(url), "%s/search?uid=%s&query=%s&page_url=%s&plain=1",
+             server_url, user_uid, query, page);
+    return request_text(REQ_NEXT, url, "Следующая страница...");
 }
 
 static bool file_is_epub(const char *path, long *size_out) {
