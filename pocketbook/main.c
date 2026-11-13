@@ -948,6 +948,10 @@ static void download_book_to_device(BookEntry *book) {
     }
 
     if (success) {
+        // Notify InkView after the final EPUB has been atomically renamed.
+        // Whether this updates the library index depends on device firmware.
+        BookReady(filepath);
+
         report_download_client_result(
             book,
             "success",
