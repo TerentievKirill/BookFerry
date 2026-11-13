@@ -822,6 +822,7 @@ static void text_poll(void) {
     }
     scanner_log(ok ? "request_success" : "request_failed", NULL, (long)kind);
     if (ok && kind == REQ_CATALOGS) app_mode = MODE_CATALOGS;
+    if (ok && kind == REQ_NEXT) current_page++;
     if (ok && (kind == REQ_SELECT_CATALOG || kind == REQ_SELECT_OPDS))
         app_mode = MODE_HOME;
     if (!ok && kind != REQ_PROFILE)
@@ -1515,6 +1516,15 @@ static void draw_screen(void) {
         draw_download_screen(x, width, button_h, spacing);
     }
 
+    if (text_job.active) {
+        int box_w = main_rect.w * 70 / 100;
+        int box_h = font->height * 3;
+        int box_x = main_rect.x + (main_rect.w - box_w) / 2;
+        int box_y = main_rect.y + (main_rect.h - box_h) / 2;
+        FillArea(box_x, box_y, box_w, box_h, WHITE);
+        DrawRect(box_x, box_y, box_w, box_h, BLACK);
+        DrawString(box_x + 20, box_y + font->height, "Запрос к серверу...");
+    }
     FullUpdate();
 }
 
@@ -1673,7 +1683,7 @@ static void handle_tap(int px, int py) {
                     next_page_url[0] &&
                     entries_count < MAX_ENTRIES
                 ) {
-                    if (load_next_page()) current_page++;
+                    load_next_page();
                 }
             }
 
@@ -1814,8 +1824,9 @@ static int main_handler(int type, int par1, int par2) {
             draw_screen();
             if (!startup_synced) {
                 startup_synced = true;
+                // Local config already has UID/catalog; avoid a blocking
+                // startup profile fetch while the user starts interacting.
                 if (!user_uid[0]) register_user();
-                else load_profile();
             }
             break;
 
