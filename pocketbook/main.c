@@ -2061,6 +2061,25 @@ static int main_handler(int type, int par1, int par2) {
             handle_tap(par1, par2);
             break;
 
+#ifdef EVT_BACKGROUND
+        case EVT_BACKGROUND:
+            // The stock launcher normally suspends apps on Home. For
+            // BookFerry, leave instead of resuming a stale InkView state.
+            scanner_log("lifecycle_background_close", NULL, 0);
+            CloseApp();
+            return 1;
+#endif
+
+#if defined(EVT_KEYPRESS) && defined(IV_KEY_HOME)
+        case EVT_KEYPRESS:
+            if (par1 == IV_KEY_HOME) {
+                scanner_log("lifecycle_home_close", NULL, 0);
+                CloseApp();
+                return 1;
+            }
+            break;
+#endif
+
         case EVT_EXIT:
             shutdown_downloads();
             CloseFont(font);
