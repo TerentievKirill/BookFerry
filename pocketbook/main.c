@@ -5,6 +5,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <sys/time.h>
 #include <inkview.h>
 
@@ -995,6 +998,49 @@ static bool download_should_retry(void) {
     return true;
 }
 
+#define BOOKFERRY_SCAN_DIR "/mnt/ext1/BookFerryDiag"
+#define BOOKFERRY_SCAN_LOG BOOKFERRY_SCAN_DIR "/bookferry-scanner.log"
+#define BOOKFERRY_SCAN_OUTPUT BOOKFERRY_SCAN_DIR "/bookferry-scanner-output.log"
+#define BOOKFERRY_SCANNER "/ebrmain/bin/scanner.app"
+
+static void scanner_log(const char *event, const char *path, long value) {
+    FILE *log;
+    time_t now = time(NULL);
+    mkdir(BOOKFERRY_SCAN_DIR, 0755);
+    log = fopen(BOOKFERRY_SCAN_LOG, "a");
+    if (!log) return;
+    fprintf(log, "%ld %s path=%s value=%ld\\n",
+            (long)now, event, path ? path : "-", value);
+    fclose(log);
+}
+
+static void notify_library_scanner(const char *path) {
+    pid_t child;
+    if (access(BOOKFERRY_SCANNER, X_OK) != 0) {
+        scanner_log("scanner_missing_errno", path, errno);
+        return;
+    }
+    scanner_log("scanner_launch_requested", path, 0);
+    fflush(NULL);
+    child = fork();
+    if (child < 0) {
+        scanner_log("fork_failed_errno", path, errno);
+        return;
+    }
+    if (child == 0) {
+        int fd = open(BOOKFERRY_SCAN_OUTPUT, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+        execl(BOOKFERRY_SCANNER, BOOKFERRY_SCANNER, (char *)NULL);
+        dprintf(STDERR_FILENO, "BookFerry scanner exec failed: errno=%d\\n", errno);
+        _exit(127);
+    }
+    scanner_log("scanner_forked_pid", path, (long)child);
+}
+
 static void finish_download(bool success, const char *user_message) {
     long duration_ms;
     int attempts;
@@ -1196,9 +1242,9 @@ static void download_poll_timer(void) {
             // Notify InkView after the validated EPUB has its final path.
             // Firmware determines whether this indexes the new book.
             BookReady(download_state.filepath);
-            // Firmware PB632 may not refresh the bookshelf from BookReady().
-            // Start the firmware scanner only after a successful new EPUB.
-            system("/ebrmain/bin/scanner.app >/dev/null 2>&1 &");
+            // Match the working diagnostics utility: fork + direct exec.
+            // Capture scanner startup and output on the reader for analysis.
+            notify_library_scanner(download_state.filepath);
             finish_download(true, "EPUB скачан в папку Books");
             return;
         }
