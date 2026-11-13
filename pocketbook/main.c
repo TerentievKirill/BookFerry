@@ -1042,67 +1042,44 @@ static void notify_library_scanner(const char *path) {
 }
 
 static void finish_download(bool success, const char *user_message) {
-    long duration_ms;
-    int attempts;
-    BookEntry book_copy;
-    DownloadTransportResult transport_copy;
     int return_mode;
 
+    // No asynchronous transfer or telemetry may survive a terminal
+    // download result (success, final failure, or user cancellation).
     ClearTimer(download_poll_timer);
-    close_download_session(false);
+    ClearTimer(report_poll_timer);
 
-    duration_ms = (long)(now_ms() - download_state.started_ms);
-    attempts = download_state.attempt;
-    book_copy = download_state.book;
-    transport_copy = download_state.transport;
+    // The active transfer has normally completed, but some error paths
+    // still have a session. Abort it to avoid background network activity.
+    close_download_session(true);
+    close_report_session(true);
+
     return_mode = download_state.return_mode;
-
     cleanup_download_parts();
 
-    download_state.active = false;
+    scanner_log(
+        success ? "download_success_cleanup" : "download_error_cleanup",
+        download_state.filepath,
+        (long)download_state.attempt
+    );
+
+    memset(&download_state, 0, sizeof(download_state));
     download_state.session = -1;
     app_mode = return_mode;
     draw_screen();
 
-    if (success) {
-        Message(
-            ICON_INFORMATION,
-            "BookFerry",
-            user_message ? user_message : "EPUB скачан в папку Books",
-            2200
-        );
+    Message(
+        success || strcmp(user_message ? user_message : "", "Загрузка отменена") == 0
+            ? ICON_INFORMATION : ICON_ERROR,
+        "BookFerry",
+        user_message
+            ? user_message
+            : (success ? "EPUB скачан в папку Books" : "Не удалось скачать EPUB"),
+        success ? 2200 : 3000
+    );
 
-        report_download_client_result(
-            &book_copy,
-            "success",
-            transport_copy.bytes,
-            attempts,
-            duration_ms,
-            transport_copy.http_status,
-            transport_copy.net_status,
-            NULL
-        );
-    } else {
-        Message(
-            strcmp(transport_copy.error, "cancelled_by_user") == 0
-                ? ICON_INFORMATION
-                : ICON_ERROR,
-            "BookFerry",
-            user_message ? user_message : "Не удалось скачать EPUB",
-            3000
-        );
-
-        report_download_client_result(
-            &book_copy,
-            "error",
-            transport_copy.bytes,
-            attempts,
-            duration_ms,
-            transport_copy.http_status,
-            transport_copy.net_status,
-            transport_copy.error
-        );
-    }
+    // Intentionally do not launch /download/client-result here:
+    // it created another asynchronous session after the download ended.
 }
 
 static void retry_or_finish_download(void) {
