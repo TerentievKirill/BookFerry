@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <inkview.h>
 
 #define DEFAULT_SERVER_URL "https://api.heartlab.app"
@@ -33,6 +34,9 @@
 #define TEXT_TIMEOUT_MS 30000LL
 #define TEXT_POLL_MS 250
 #define SCANNER_POLL_MS 500
+#define SCANNER_GRACE_MS 1500LL
+#define SCANNER_TERM_GRACE_MS 2500LL
+#define SCANNER_MAX_RUNTIME_MS 30000LL
 
 enum {
     MODE_HOME = 0,
@@ -115,6 +119,10 @@ typedef struct {
 static TextJob text_job = { .session = -1 };
 static char requested_opds[1024] = "";
 static pid_t scanner_child = -1;
+static long scanner_output_offset = 0;
+static long long scanner_started_ms = 0;
+static long long scanner_finished_ms = 0;
+static long long scanner_term_ms = 0;
 
 static void draw_screen(void);
 static void download_poll_timer(void);
@@ -705,6 +713,21 @@ static void scanner_log(const char *event, const char *path, long value) {
 
 static void notify_library_scanner(const char *path) {
     pid_t child;
+    FILE *output_file;
+    if (scanner_child > 0) {
+        scanner_log("scanner_already_running", path, (long)scanner_child);
+        return;
+    }
+    output_file = fopen(BOOKFERRY_SCAN_OUTPUT, "ab");
+    if (output_file) {
+        if (fseek(output_file, 0, SEEK_END) == 0)
+            scanner_output_offset = ftell(output_file);
+        else
+            scanner_output_offset = 0;
+        fclose(output_file);
+    } else {
+        scanner_output_offset = 0;
+    }
     if (access(BOOKFERRY_SCANNER, X_OK) != 0) {
         scanner_log("scanner_missing_errno", path, errno);
         return;
@@ -729,6 +752,9 @@ static void notify_library_scanner(const char *path) {
     }
     scanner_log("scanner_forked_pid", path, (long)child);
     scanner_child = child;
+    scanner_started_ms = now_ms();
+    scanner_finished_ms = 0;
+    scanner_term_ms = 0;
     ClearTimer(scanner_poll);
     SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
 }
@@ -833,14 +859,59 @@ static void text_poll(void) {
 static void scanner_poll(void) {
     int status = 0;
     pid_t result;
+    FILE *output;
+    char line[512];
+    long long now;
+
     if (scanner_child <= 0) return;
+
+    // Never signal an unrelated PID: waitpid() establishes whether our
+    // scanner child is still alive before kill() can be used.
     result = waitpid(scanner_child, &status, WNOHANG);
-    if (result == 0) {
-        SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
+    if (result == scanner_child) {
+        scanner_log("scanner_reaped", NULL, (long)status);
+        scanner_child = -1;
         return;
     }
-    scanner_log("scanner_reaped", NULL, (long)status);
-    scanner_child = -1;
+    if (result < 0) {
+        scanner_log("scanner_waitpid_errno", NULL, (long)errno);
+        scanner_child = -1;
+        return;
+    }
+
+    now = now_ms();
+    output = fopen(BOOKFERRY_SCAN_OUTPUT, "rb");
+    if (output) {
+        if (fseek(output, scanner_output_offset, SEEK_SET) == 0) {
+            while (fgets(line, sizeof(line), output)) {
+                if (!scanner_finished_ms && strstr(line, "Scan finished")) {
+                    scanner_finished_ms = now;
+                    scanner_log("scanner_scan_finished", NULL, (long)scanner_child);
+                }
+            }
+            {
+                long next = ftell(output);
+                if (next >= 0) scanner_output_offset = next;
+            }
+        }
+        fclose(output);
+    }
+
+    if (!scanner_term_ms &&
+        ((scanner_finished_ms && now - scanner_finished_ms >= SCANNER_GRACE_MS) ||
+         (now - scanner_started_ms >= SCANNER_MAX_RUNTIME_MS))) {
+        scanner_log("scanner_sigterm", NULL, (long)scanner_child);
+        if (kill(scanner_child, SIGTERM) == 0) scanner_term_ms = now;
+        else scanner_log("scanner_sigterm_errno", NULL, (long)errno);
+    } else if (scanner_term_ms &&
+               now - scanner_term_ms >= SCANNER_TERM_GRACE_MS) {
+        scanner_log("scanner_sigkill", NULL, (long)scanner_child);
+        if (kill(scanner_child, SIGKILL) == 0)
+            scanner_term_ms = now; // do not spin or spam while being reaped
+        else
+            scanner_log("scanner_sigkill_errno", NULL, (long)errno);
+    }
+    SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
 }
 
 static void finish_download(bool success, const char *user_message) {
@@ -1024,7 +1095,7 @@ static void download_poll_timer(void) {
             // Diagnostic A/B: do not start scanner.app from BookFerry.
             // Keep BookReady() to test whether scanner launch triggers
             // the input freeze after downloading a book.
-            scanner_log("scanner_skipped_ab_test", download_state.filepath, 0);
+            notify_library_scanner(download_state.filepath);
             finish_download(true, "EPUB скачан в папку Books");
             return;
         }
