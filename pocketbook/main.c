@@ -728,6 +728,118 @@ static void notify_library_scanner(const char *path) {
         _exit(127);
     }
     scanner_log("scanner_forked_pid", path, (long)child);
+    scanner_child = child;
+    ClearTimer(scanner_poll);
+    SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
+}
+
+static void cancel_text(void) {
+    ClearTimer(text_poll);
+    if (text_job.session >= 0) {
+        AbortTransfer(text_job.session);
+        CloseSession(text_job.session);
+    }
+    text_job.session = -1;
+    text_job.active = false;
+    text_job.kind = REQ_NONE;
+    remove(TEXT_FILE);
+}
+
+static bool request_text(RequestKind kind, const char *url, const char *label) {
+    int session, result;
+    if (text_job.active || download_state.active) return false;
+    scanner_log("request_start", NULL, (long)kind);
+    session = NewSession();
+    if (session < 0) {
+        scanner_log("request_session_failed", NULL, session);
+        return false;
+    }
+    remove(TEXT_FILE);
+    result = DownloadTo(session, url, NULL, TEXT_FILE, 30);
+    if (result != NET_OK) {
+        scanner_log("request_start_failed", NULL, result);
+        CloseSession(session);
+        return false;
+    }
+    text_job.session = session;
+    text_job.active = true;
+    text_job.kind = kind;
+    text_job.started_ms = now_ms();
+    if (label) show_progress(label);
+    SetWeakTimer("bookferry_text", text_poll, TEXT_POLL_MS);
+    return true;
+}
+
+static void text_poll(void) {
+    int status;
+    long response = 0;
+    iv_sessioninfo *info;
+    bool ok = false;
+    RequestKind kind;
+    char *body = NULL;
+    if (!text_job.active || text_job.session < 0) return;
+    status = GetSessionStatus(text_job.session);
+    info = GetSessionInfo(text_job.session);
+    if (info) response = info->response;
+    if (status >= 0 && !(status == NET_OK && response != 0) &&
+        now_ms() - text_job.started_ms < TEXT_TIMEOUT_MS) {
+        SetWeakTimer("bookferry_text", text_poll, TEXT_POLL_MS);
+        return;
+    }
+
+    kind = text_job.kind;
+    if (status == NET_OK && response >= 200 && response < 300) {
+        CloseSession(text_job.session);
+        text_job.session = -1;
+        body = read_text_file(TEXT_FILE);
+    } else {
+        AbortTransfer(text_job.session);
+        CloseSession(text_job.session);
+        text_job.session = -1;
+    }
+    text_job.active = false;
+    text_job.kind = REQ_NONE;
+    remove(TEXT_FILE);
+
+    if (body) {
+        switch (kind) {
+        case REQ_REGISTER: ok = parse_register(body); break;
+        case REQ_PROFILE: ok = parse_profile(body); break;
+        case REQ_CATALOGS: ok = parse_catalogs(body); break;
+        case REQ_SELECT_CATALOG: ok = parse_selection(body, false); break;
+        case REQ_SELECT_OPDS: ok = parse_selection(body, true); break;
+        case REQ_SEARCH:
+            clear_entries();
+            ok = parse_search_page(body);
+            if (ok) { app_mode = MODE_RESULTS; current_page = 0; }
+            break;
+        case REQ_NEXT:
+            ok = parse_search_page(body);
+            break;
+        default: break;
+        }
+        free(body);
+    }
+    scanner_log(ok ? "request_success" : "request_failed", NULL, (long)kind);
+    if (ok && kind == REQ_CATALOGS) app_mode = MODE_CATALOGS;
+    if (ok && (kind == REQ_SELECT_CATALOG || kind == REQ_SELECT_OPDS))
+        app_mode = MODE_HOME;
+    if (!ok && kind != REQ_PROFILE)
+        Message(ICON_ERROR, "BookFerry", "Запрос не выполнен", 2500);
+    draw_screen();
+}
+
+static void scanner_poll(void) {
+    int status = 0;
+    pid_t result;
+    if (scanner_child <= 0) return;
+    result = waitpid(scanner_child, &status, WNOHANG);
+    if (result == 0) {
+        SetWeakTimer("bookferry_scanner", scanner_poll, SCANNER_POLL_MS);
+        return;
+    }
+    scanner_log("scanner_reaped", NULL, (long)status);
+    scanner_child = -1;
 }
 
 static void finish_download(bool success, const char *user_message) {
