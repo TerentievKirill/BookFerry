@@ -1021,7 +1021,10 @@ static void download_poll_timer(void) {
             BookReady(download_state.filepath);
             // Match the working diagnostics utility: fork + direct exec.
             // Capture scanner startup and output on the reader for analysis.
-            notify_library_scanner(download_state.filepath);
+            // Diagnostic A/B: do not start scanner.app from BookFerry.
+            // Keep BookReady() to test whether scanner launch triggers
+            // the input freeze after downloading a book.
+            scanner_log("scanner_skipped_ab_test", download_state.filepath, 0);
             finish_download(true, "EPUB скачан в папку Books");
             return;
         }
