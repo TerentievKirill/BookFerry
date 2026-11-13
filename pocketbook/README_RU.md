@@ -155,3 +155,30 @@ register
 ```text
 POCKETBOOK SMOKE: PASSED
 ```
+
+## Автоматическая сборка приложения
+
+GitHub Actions: [Build PocketBook client](../.github/workflows/pocketbook-build.yml).
+
+После изменения файлов `pocketbook/**` в PR или main, либо ручного запуска
+`workflow_dispatch`, собираются два варианта:
+
+- `pb632-fw6` — PocketBook Touch HD 3 / PB632, SDK B288 6.10.
+- `pocketbook-armv7-softfp` — экспериментальная общая сборка для ARMv7 softfp.
+  Совместимость с другими моделями нужно проверить на реальных устройствах.
+
+В каждом артефакте есть `BookFerry.app` и ZIP с этим файлом.
+Из архива GitHub Actions извлеките `BookFerry.app`, затем скопируйте
+его в папку `/applications` на накопителе PocketBook, заменив старую
+версию при необходимости. Конфиг в `system/config/BookFerry` не трогайте.
+
+Локальная сборка на Linux с `curl`, `7z`, `zip`, Python 3 и SDK:
+
+```bash
+PB_TARGET=pb632-fw6 bash pocketbook/build.sh
+```
+
+Скрипт проверяет SHA-256 SDK перед использованием, компилирует исходник
+`pocketbook/main.c` через InkView SDK, проверяет ARM ELF и создаёт
+`dist/BookFerry-pb632-fw6.zip`. Текущий `pocketbook/BookFerry.app`
+остаётся нетронутым: CI публикует новый бинарник только как артефакт.
