@@ -3,25 +3,63 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SDK_URL="https://github.com/Sean-on-Git/PocketBook-SDK/releases/download/6.10/SDK-B288-6.10.7z"
-SDK_SHA256="18405fb276535d53a4b70d2bbf4033313cded58da5002d563ccf7e1838440c0b"
+# Use the firmware-matched SDK for older PocketBooks. Building for
+# ARMv7 alone is insufficient if libinkview requires a newer firmware.
+TARGET="${PB_TARGET:-pb632-fw6}"
 CACHE="${PB_SDK_CACHE:-$PWD/work/downloads}"
 SDK_ROOT="${PB_SDK_ROOT:-$PWD/work/sdk}"
-SDK="$SDK_ROOT/SDK-B288-6.10"
-PREFIX="$SDK/usr/bin/arm-obreey-linux-gnueabi"
-TARGET="${PB_TARGET:-pb632-fw6}"
+SDK_PLATFORM="B288"
+
 case "$TARGET" in
-  pb632-fw6) FLAGS="-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=softfp" ;;
-  pocketbook-armv7-softfp) FLAGS="-march=armv7-a -mtune=cortex-a7 -mfpu=neon -mfloat-abi=softfp" ;;
-  *) echo "Unknown target: $TARGET" >&2; exit 2 ;;
+  pb632-fw6)
+    SDK_VERSION="6.10"
+    SDK_URL="https://github.com/Sean-on-Git/PocketBook-SDK/releases/download/6.10/SDK-B288-6.10.7z"
+    SDK_SHA256="18405fb276535d53a4b70d2bbf4033313cded58da5002d563ccf7e1838440c0b"
+    SDK_EXPECTED_BYTES="642311775"
+    FLAGS="-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=softfp"
+    ;;
+  pocketbook-armv7-softfp)
+    SDK_VERSION="6.10"
+    SDK_URL="https://github.com/Sean-on-Git/PocketBook-SDK/releases/download/6.10/SDK-B288-6.10.7z"
+    SDK_SHA256="18405fb276535d53a4b70d2bbf4033313cded58da5002d563ccf7e1838440c0b"
+    SDK_EXPECTED_BYTES="642311775"
+    FLAGS="-march=armv7-a -mtune=cortex-a7 -mfpu=neon -mfloat-abi=softfp"
+    ;;
+  pb618-fw68)
+    SDK_VERSION="6.8"
+    SDK_URL="https://github.com/pocketbook/SDK_6.3.0/releases/download/6.8/SDK-B288-6.8.7z"
+    # Official release predates GitHub asset digests. Once its SHA256
+    # is verified, pin it here as with the 6.10 SDK.
+    SDK_SHA256=""
+    SDK_EXPECTED_BYTES="1301230510"
+    FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp"
+    ;;
+  *)
+    echo "Unknown target: $TARGET" >&2
+    exit 2
+    ;;
 esac
+
+SDK="$SDK_ROOT/SDK-$SDK_PLATFORM-$SDK_VERSION"
+PREFIX="$SDK/usr/bin/arm-obreey-linux-gnueabi"
 mkdir -p "$CACHE" "$SDK_ROOT" dist
-ARCHIVE="$CACHE/SDK-B288-6.10.7z"
+ARCHIVE="$CACHE/SDK-$SDK_PLATFORM-$SDK_VERSION.7z"
 if [[ ! -f "$ARCHIVE" ]]; then
   curl --fail --location --retry 3 "$SDK_URL" -o "$ARCHIVE.part"
   mv "$ARCHIVE.part" "$ARCHIVE"
 fi
-echo "$SDK_SHA256  $ARCHIVE" | sha256sum --check
+if [[ "$(stat -c %s "$ARCHIVE")" != "$SDK_EXPECTED_BYTES" ]]; then
+  echo "Unexpected SDK archive size: $ARCHIVE" >&2
+  rm -f "$ARCHIVE"
+  exit 1
+fi
+if [[ -n "$SDK_SHA256" ]]; then
+  echo "$SDK_SHA256  $ARCHIVE" | sha256sum --check
+else
+  echo "SDK $SDK_VERSION: release size verified; cryptographic checksum not yet pinned" >&2
+  sha256sum "$ARCHIVE"
+  7z t "$ARCHIVE" > /dev/null
+fi
 if [[ ! -x "$PREFIX-gcc" ]]; then
   7z x -y "$ARCHIVE" "-o$SDK_ROOT" > /dev/null || {
     # 7zip can report warnings for safe SDK symlink entries.
