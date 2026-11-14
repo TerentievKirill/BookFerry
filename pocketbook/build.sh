@@ -28,9 +28,8 @@ case "$TARGET" in
   pb618-fw68)
     SDK_VERSION="6.8"
     SDK_URL="https://github.com/pocketbook/SDK_6.3.0/releases/download/6.8/SDK-B288-6.8.7z"
-    # Official release predates GitHub asset digests. Once its SHA256
-    # is verified, pin it here as with the 6.10 SDK.
-    SDK_SHA256=""
+    # SHA-256 verified from the downloaded official GitHub release archive.
+    SDK_SHA256="b924fbeba90e9258854e910c2c29a3105e6fb9c6e0e6de4cb13a015be3fc23e2"
     SDK_EXPECTED_BYTES="1301230510"
     FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp"
     ;;
@@ -40,7 +39,12 @@ case "$TARGET" in
     ;;
 esac
 
-SDK="$SDK_ROOT/SDK-$SDK_PLATFORM-$SDK_VERSION"
+# The upstream 6.8 archive has an unversioned SDK-B288 root directory.
+if [[ "$SDK_VERSION" == "6.8" ]]; then
+  SDK="$SDK_ROOT/SDK-$SDK_PLATFORM"
+else
+  SDK="$SDK_ROOT/SDK-$SDK_PLATFORM-$SDK_VERSION"
+fi
 PREFIX="$SDK/usr/bin/arm-obreey-linux-gnueabi"
 mkdir -p "$CACHE" "$SDK_ROOT" dist
 ARCHIVE="$CACHE/SDK-$SDK_PLATFORM-$SDK_VERSION.7z"
@@ -53,13 +57,7 @@ if [[ "$(stat -c %s "$ARCHIVE")" != "$SDK_EXPECTED_BYTES" ]]; then
   rm -f "$ARCHIVE"
   exit 1
 fi
-if [[ -n "$SDK_SHA256" ]]; then
-  echo "$SDK_SHA256  $ARCHIVE" | sha256sum --check
-else
-  echo "SDK $SDK_VERSION: release size verified; cryptographic checksum not yet pinned" >&2
-  sha256sum "$ARCHIVE"
-  7z t "$ARCHIVE" > /dev/null
-fi
+echo "$SDK_SHA256  $ARCHIVE" | sha256sum --check
 if [[ ! -x "$PREFIX-gcc" ]]; then
   7z x -y "$ARCHIVE" "-o$SDK_ROOT" > /dev/null || {
     # 7zip can report warnings for safe SDK symlink entries.
