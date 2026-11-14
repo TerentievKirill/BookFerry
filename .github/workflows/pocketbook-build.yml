@@ -21,7 +21,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [pb632-fw6, pocketbook-armv7-softfp]
+        include:
+          - target: pb632-fw6
+            sdk_version: "6.10"
+          - target: pocketbook-armv7-softfp
+            sdk_version: "6.10"
+          - target: pb618-fw68
+            sdk_version: "6.8"
     steps:
       - uses: actions/checkout@v4
       - name: Install SDK extraction tools
@@ -30,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: work/downloads
-          key: bookferry-pocketbook-sdk-b288-6.10
+          key: bookferry-pocketbook-sdk-b288-${{ matrix.sdk_version }}
       - name: Compile native PocketBook application
         env:
           PB_TARGET: ${{ matrix.target }}
