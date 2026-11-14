@@ -66,6 +66,12 @@ if [[ ! -x "$PREFIX-gcc" ]]; then
   python3 pocketbook/repair_sdk_links.py "$ARCHIVE" "$SDK_ROOT"
 fi
 test -x "$PREFIX-gcc" || { echo "SDK compiler is missing" >&2; exit 1; }
+# Older SDK host tools require bundled libmpfr.so.4, libmpc and libgmp.
+# Ubuntu 24.04 no longer ships this ABI, so point the dynamic loader
+# to host-side libraries shipped with the official B288 SDK.
+if [[ "$SDK_VERSION" == "6.8" ]]; then
+  export LD_LIBRARY_PATH="$SDK/usr/lib:${LD_LIBRARY_PATH:-}"
+fi
 SYSROOT="$SDK/usr/arm-obreey-linux-gnueabi/sysroot"
 INKVIEW_HEADER="$(find "$SDK" -type f -name inkview.h -print -quit)"
 INKVIEW_LIBRARY="$(find "$SDK" \( -type f -o -type l \) \( -name libinkview.so -o -name libinkview.a \) -print -quit)"
